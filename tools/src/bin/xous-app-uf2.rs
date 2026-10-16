@@ -8,9 +8,6 @@ use std::io::{Cursor, Write};
 use std::str::FromStr;
 
 use clap::{App, Arg};
-use slh_dsa::Sha2_128_24;
-use slh_dsa::SigningKey;
-use slh_dsa::signature::Keypair;
 use xous_semver::SemVer;
 use xous_tools::elf::read_minielf;
 use xous_tools::sign_image::bin_to_uf2;
@@ -158,10 +155,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Programs: {}", args);
 
     let private_key = pem::parse(DEV_KEY_PEM)?;
-    let pq_sq = SigningKey::<Params>::try_from(DEV_KEY_PQ.as_slice()).unwrap_or_else(|_| {
-        die(&format!("invalid Test key: expected 64 bytes (4*n for SHA2-128-24), got {}", DEV_KEY_PQ.len()))
-    });
-
     let git_rev = matches.value_of("git-rev");
     let semver: Option<[u8; 16]> = if let Some(git_describe_str) = matches.value_of("git-describe") {
         Some(git_describe_str.parse::<SemVer>().expect("git-describe format incorrect").into())
@@ -175,7 +168,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create the swap target image and encrypt swap_buffer to it
         let mut swap = Cursor::new(Vec::new());
-        swap_buffer.encrypt_to(&mut swap, &private_key, Some(anti_rollback as usize), git_rev, semver)?;
+        swap_buffer.encrypt_to(
+            &mut swap,
+            &private_key,
+            Some(anti_rollback as usize),
+            git_rev,
+            semver,
+            None::<(&str, Option<&str>)>,
+        )?;
 
         // generate a uf2 file
         let swap_uf2 = "swap.uf2";
@@ -217,7 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("app"),
             Some(anti_rollback as usize),
             false,
-            Some((DEV_KEY_PQ, None)),
+            Some((DEV_KEY_PQ, None::<&str>)),
         )?;
 
         let app_uf2 = "apps.uf2";

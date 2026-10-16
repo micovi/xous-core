@@ -244,3 +244,6 @@ path = "./svd2utra"
 # path = "../tts-backend"
 # [patch.crates-io.xous-api-susres]
 # path = "./api/xous-api-susres"
+
+[patch.crates-io.bao1x-api]
+path = "libs/bao1x-api"
