@@ -244,6 +244,28 @@ impl IoxHal {
         }
     }
 
+    /// Claims the pins set in `pins` for the calling process, for its lifetime. The HAL
+    /// service then refuses to reconfigure or write them for any other process and hides
+    /// their values from it. A pin already claimed by another process refuses the whole
+    /// claim; the refused pins are returned in the error.
+    #[cfg(feature = "iox-claims")]
+    pub fn claim_iox(&self, port: IoxPort, pins: u16) -> Result<(), ClaimError> {
+        match xous::send_message(
+            self.conn,
+            xous::Message::new_blocking_scalar(
+                HalOpcode::ClaimIox.to_usize().unwrap(),
+                port as usize,
+                pins as usize,
+                0,
+                0,
+            ),
+        ) {
+            Ok(xous::Result::Scalar5(_, 0, _, _, _)) => Ok(()),
+            Ok(xous::Result::Scalar5(_, 1, _, _, _)) => Err(ClaimError::Owned { pins }),
+            _ => panic!("Internal Error: Couldn't claim I/O pins"),
+        }
+    }
+
     /// This function takes a 32-bit bitmask, corresponding to BIO 31 through 0, where
     /// a `1` indicates to map that BIO to a GPIO.
     ///

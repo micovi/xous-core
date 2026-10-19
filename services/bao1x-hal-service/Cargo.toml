@@ -56,4 +56,7 @@ accel-kbd = []
 oem-baosec-lite = ["bao1x-hal/oem-baosec-lite"]
 
 with-duart = ["bao1x-hal/debug-print-duart"]
+# Let a process claim I/O pins; configuration and writes of claimed pins from other
+# processes are refused and their values hidden from them (see bao1x-api).
+iox-claims = ["bao1x-api/iox-claims"]
 default = ["app-uart", "utralib"]

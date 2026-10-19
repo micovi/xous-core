@@ -32,6 +32,9 @@ bitfield! {
     pub wakeup, set_wakeup: 10;
 }
 fn irq_select_from_port(port: IoxPort, pin: u8) -> u32 { (port as u32) * 16 + pin as u32 }
+/// The PID the kernel stamped on the message; 0 when there is none (a kernel-originated message).
+#[cfg(feature = "iox-claims")]
+fn sender_pid(sender: &Sender) -> u8 { sender.pid().map(|pid| pid.get()).unwrap_or(0) }
 fn find_first_none<T>(arr: &[Option<T>]) -> Option<usize> { arr.iter().position(|item| item.is_none()) }
 
 #[derive(Debug)]
@@ -261,6 +264,9 @@ fn main() {
         let mut i2c_conn: Option<xous::CID> = None;
         let mut peri_conn: Option<xous::CID> = None;
 
+        #[cfg(feature = "iox-claims")]
+        let mut claims = IoxClaims::new();
+
         let mut msg_opt = None;
         log::debug!("Starting main loop");
         loop {
@@ -356,12 +362,26 @@ fn main() {
                     }
                 }
                 HalOpcode::ConfigureIox => {
+                    #[cfg(feature = "iox-claims")]
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     let buf = unsafe {
                         xous_ipc::Buffer::from_memory_message(
                             msg_opt.as_mut().unwrap().body.memory_message().unwrap(),
                         )
                     };
                     let config = buf.to_original::<IoxConfigMessage, _>().unwrap();
+                    // The message is an immutable lend, so a refusal cannot be reported back;
+                    // the configuration is dropped and logged.
+                    #[cfg(feature = "iox-claims")]
+                    if !claims.allows(config.port, config.pin, pid) {
+                        log::warn!(
+                            "PID {} may not configure {:?}{}: claimed by another process",
+                            pid,
+                            config.port,
+                            config.pin
+                        );
+                        continue;
+                    }
                     if let Some(f) = config.function {
                         iox.set_alternate_function(config.port, config.pin, f);
                     }
@@ -532,17 +552,57 @@ fn main() {
                     }
                 }
                 HalOpcode::SetGpioBank => {
+                    #[cfg(feature = "iox-claims")]
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
                         let port: IoxPort = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
                         let value = scalar.arg2 as u16;
-                        let bitmask = scalar.arg3 as u16;
-                        iox.set_gpio_bank(port, value, bitmask);
+                        #[cfg_attr(feature = "iox-claims", allow(unused_mut))]
+                        let mut bitmask = scalar.arg3 as u16;
+                        // pins claimed by other processes are dropped from the write; the rest go through
+                        #[cfg(feature = "iox-claims")]
+                        {
+                            bitmask = claims.write_mask(port, bitmask, pid);
+                        }
+                        if bitmask != 0 {
+                            iox.set_gpio_bank(port, value, bitmask);
+                        }
                     }
                 }
                 HalOpcode::GetGpioBank => {
+                    #[cfg(feature = "iox-claims")]
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
                         let port: IoxPort = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
-                        scalar.arg1 = iox.get_gpio_bank(port) as usize;
+                        #[cfg_attr(feature = "iox-claims", allow(unused_mut))]
+                        let mut value = iox.get_gpio_bank(port);
+                        // pins claimed by other processes read as 0
+                        #[cfg(feature = "iox-claims")]
+                        {
+                            value &= claims.read_mask(port, pid);
+                        }
+                        scalar.arg1 = value as usize;
+                    }
+                }
+                #[cfg(feature = "iox-claims")]
+                HalOpcode::ClaimIox => {
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
+                    if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
+                        let port: Option<IoxPort> = num_traits::FromPrimitive::from_usize(scalar.arg1);
+                        let pins = scalar.arg2 as u16;
+                        scalar.arg1 = match port {
+                            Some(port) if pid != 0 => match claims.claim(port, pins, pid) {
+                                Ok(()) => {
+                                    log::info!("PID {} claimed {:?} pins {:#06x}", pid, port, pins);
+                                    0
+                                }
+                                Err(ClaimError::Owned { pins }) => {
+                                    log::warn!("PID {} refused {:?} pins {:#06x}: claimed", pid, port, pins);
+                                    1
+                                }
+                            },
+                            _ => 2,
+                        };
                     }
                 }
                 HalOpcode::ConfigureBio => {
