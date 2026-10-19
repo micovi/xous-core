@@ -979,7 +979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             builder.add_services(&get_cratespecs());
         }
 
-        Some("dabao") => {
+        Some("dabao") | Some("dabao-zsigner") => {
             let board = "board-dabao";
             let sigblock_size = bao1x_api::signatures::SIGBLOCK_LEN;
             update_flash_origin(
@@ -1006,6 +1006,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             builder.add_kernel_feature("debug-proc");
             match task.as_deref() {
                 Some("dabao") => builder.target_bao1x_soc(),
+                // the dabao image with the hardening features of the services on: pin claims
+                // in the HAL, a connection limit and first-caller gating in the keystore, a
+                // device-bound secret, and no read-back print of slot writes
+                Some("dabao-zsigner") => builder
+                    .target_bao1x_soc()
+                    .add_feature("bao1x-hal-service/iox-claims")
+                    .add_feature("keystore/caller-gating")
+                    .add_feature("keystore/device-secret")
+                    .add_feature("keystore/quiet-slot-readback"),
                 _ => panic!("should be unreachable"),
             };
 
@@ -1185,6 +1194,7 @@ Hardware images:
  tiny                    Precursor tiny image. For testing with services built out-of-tree.
  baosec                  Baosec application target image.
  dabao                   Dabao application target image.
+ dabao-zsigner           Dabao image with pin claims, keystore caller gating and the device-bound secret on.
  bao1x-baremetal-baosec  Baremetal image for baosec boards.
  bao1x-baremetal-dabao   Baremetal image for dabao boards.
  bao1x-erasure-dabao     Erasure experimental image for dabao boards.
