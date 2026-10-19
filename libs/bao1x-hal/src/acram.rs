@@ -419,6 +419,7 @@ impl SlotManager {
         if self.user_id.is_accessible(&acl, &AccessType::Read) {
             // read-verify only if we have read access
             let readback = self.read(slot)?;
+            #[cfg(not(feature = "quiet-slot-readback"))]
             crate::println!("rbk: {:x?}", &readback[..8]);
             if readback != value { Err(AccessError::WriteError) } else { Ok(()) }
         } else {

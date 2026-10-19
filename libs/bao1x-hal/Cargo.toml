@@ -142,4 +142,7 @@ derive-rkyv = ["rkyv"]
 # flag for bypassing extra software checks so that hardware can be redteamed
 redteam = []
 
+# Drop the `rbk:` print of the first eight bytes of every slot written through SlotManager
+quiet-slot-readback = []
+
 default = []
