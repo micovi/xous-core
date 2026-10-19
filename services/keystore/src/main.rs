@@ -20,8 +20,18 @@ fn main() -> ! {
     #[cfg(feature = "board-baosec")]
     let keys_sid = xns.register_name(SERVER_NAME_KEYS, Some(5)).expect("can't register server");
 
+    // With caller gating the keystore takes exactly the connections the image needs. On the
+    // Dabao that is one: none of the stock services of the `dabao` image (ticktimer, log, names,
+    // usb-bao1x, bao1x-hal-service) depends on the keystore or keystore-api crates, so none
+    // connects; the one application that uses the gated slots and counters connects once.
+    #[cfg(all(feature = "caller-gating", not(feature = "board-baosec")))]
+    const MAX_CONNECTIONS: u32 = 1;
+    #[cfg(all(feature = "caller-gating", not(feature = "board-baosec")))]
+    let keys_sid =
+        xns.register_name(SERVER_NAME_KEYS, Some(MAX_CONNECTIONS)).expect("can't register server");
+
     // permissive default for e.g. Dabao
-    #[cfg(not(feature = "board-baosec"))]
+    #[cfg(not(any(feature = "board-baosec", feature = "caller-gating")))]
     let keys_sid = xns.register_name(SERVER_NAME_KEYS, None).expect("can't register server");
 
     platform::keystore(keys_sid);

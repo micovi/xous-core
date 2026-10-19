@@ -9,6 +9,12 @@ use xous_ipc::Buffer;
 
 use crate::platform::KeyStore;
 
+/// The application key slots, relative to the application range, that are gated to their
+/// first caller: the first 256 slots (8 KiB), where the seed record and the attempt counter
+/// of the key process live.
+#[cfg(feature = "caller-gating")]
+const GATED_APP_SLOTS: core::ops::Range<usize> = 0..256;
+
 pub fn keystore(sid: SID) -> ! {
     let hal = bao1x_hal_service::Hal::new();
     let mut rram = Reram::new();
@@ -29,6 +35,9 @@ pub fn keystore(sid: SID) -> ! {
     #[cfg(feature = "swap")]
     let xns = xous_names::XousNames::new().unwrap();
 
+    #[cfg(feature = "caller-gating")]
+    let mut gate = CallerGate::new(GATED_APP_SLOTS, APP_OWC_BEGIN);
+
     let mut msg_opt = None;
 
     // allow preemption once the keystore has claimed locks on all its critical resources
@@ -38,6 +47,9 @@ pub fn keystore(sid: SID) -> ! {
         let msg = msg_opt.as_mut().unwrap();
         let opcode = num_traits::FromPrimitive::from_usize(msg.body.id()).unwrap_or(Opcode::InvalidCall);
         log::debug!("{:?}", opcode);
+        // the PID the kernel stamped on the message; 0 when there is none
+        #[cfg(feature = "caller-gating")]
+        let sender_pid: u8 = msg.sender.pid().map(|pid| pid.get()).unwrap_or(0);
         match opcode {
             Opcode::AesOracle => {
                 if let Some(mem) = msg.body.memory_message_mut() {
@@ -131,8 +143,14 @@ pub fn keystore(sid: SID) -> ! {
                     if [scalar.arg2, scalar.arg3, scalar.arg4] == OWC_MAGIC_INC
                         && scalar.arg1 < MAX_ONEWAY_COUNTERS
                     {
+                        #[cfg(feature = "caller-gating")]
+                        let counter_refused = !counter_allowed(&mut gate, scalar.arg1, sender_pid);
+                        #[cfg(not(feature = "caller-gating"))]
+                        let counter_refused = false;
                         if !cfg!(feature = "owc-inc") && scalar.arg1 < APP_OWC_BEGIN {
                             scalar.arg1 = OneWayErr::OutOfBounds.to_usize().unwrap();
+                        } else if counter_refused {
+                            scalar.arg1 = OneWayErr::CallerRefused.to_usize().unwrap();
                         } else {
                             match unsafe { store.owc.inc(scalar.arg1) } {
                                 Ok(_) => {
@@ -151,12 +169,20 @@ pub fn keystore(sid: SID) -> ! {
                     if [scalar.arg2, scalar.arg3, scalar.arg4] == OWC_MAGIC_GET
                         && scalar.arg1 < MAX_ONEWAY_COUNTERS
                     {
-                        match store.owc.get(scalar.arg1) {
-                            Ok(val) => {
-                                scalar.arg1 = OneWayErr::None.to_usize().unwrap();
-                                scalar.arg2 = val as usize;
+                        #[cfg(feature = "caller-gating")]
+                        let counter_refused = !counter_allowed(&mut gate, scalar.arg1, sender_pid);
+                        #[cfg(not(feature = "caller-gating"))]
+                        let counter_refused = false;
+                        if counter_refused {
+                            scalar.arg1 = OneWayErr::CallerRefused.to_usize().unwrap();
+                        } else {
+                            match store.owc.get(scalar.arg1) {
+                                Ok(val) => {
+                                    scalar.arg1 = OneWayErr::None.to_usize().unwrap();
+                                    scalar.arg2 = val as usize;
+                                }
+                                Err(e) => scalar.arg1 = e.to_usize().unwrap(),
                             }
-                            Err(e) => scalar.arg1 = e.to_usize().unwrap(),
                         }
                     } else {
                         scalar.arg1 = OneWayErr::InternalError.to_usize().unwrap();
@@ -170,6 +196,13 @@ pub fn keystore(sid: SID) -> ! {
                     // as_flat saves a copy step, but we have to deserialize some enums manually
                     let mut app_key = buffer.to_original::<AppKey, _>().unwrap();
                     match app_key {
+                        #[cfg(feature = "caller-gating")]
+                        AppKey::ReadRequest { index, .. } | AppKey::Write { index, .. }
+                            if gate.check_slot(index, sender_pid).is_err() =>
+                        {
+                            log::warn!("PID {} refused app slot {}: owned by another process", sender_pid, index);
+                            app_key = AppKey::CallerRefused;
+                        }
                         AppKey::ReadRequest { guard, index } => {
                             if guard != APPKEY_GUARD {
                                 app_key = AppKey::InternalError;
@@ -236,6 +269,19 @@ pub fn keystore(sid: SID) -> ! {
             Opcode::InvalidCall => {
                 log::error!("Invalid call in keystore: {:?}", opcode);
             }
+        }
+    }
+}
+
+/// Whether the caller may use one-way counter `index`: open below the application range,
+/// gated to the first caller at and above it.
+#[cfg(feature = "caller-gating")]
+fn counter_allowed(gate: &mut CallerGate, index: usize, pid: u8) -> bool {
+    match gate.check_counter(index, pid) {
+        Ok(()) => true,
+        Err(refused) => {
+            log::warn!("PID {} refused counter {}: owned by PID {}", pid, index, refused.owner);
+            false
         }
     }
 }

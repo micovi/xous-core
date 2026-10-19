@@ -147,4 +147,9 @@ loader-dabao = []
 # this feature enables the printing of secret materials for debug purposes
 hazardous-debug = []
 
+# Register with a connection limit, and let the first process that uses the gated
+# application slots or the application one-way counters own them; every other process
+# is refused with a typed error.
+caller-gating = ["keystore-api/caller-gating"]
+
 default = []
