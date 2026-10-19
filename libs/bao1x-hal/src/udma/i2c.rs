@@ -65,6 +65,9 @@ impl I2cPending {
 }
 
 const MAX_I2C_TXLEN: usize = 512;
+/// The longest write or read one transaction takes, in bytes: one command per byte must fit in
+/// the command buffer with the start, address and stop commands.
+pub const MAX_I2C_TRANSFER: usize = 255;
 const MAX_I2C_RXLEN: usize = 512;
 const MAX_I2C_CMDLEN: usize = 512;
 
@@ -408,8 +411,10 @@ impl<'a> I2cDriver<'a> {
     }
 
     pub fn i2c_write_async(&mut self, dev: u8, adr: u8, data: &[u8]) -> Result<usize, xous::Error> {
+        if data.len() > MAX_I2C_TRANSFER {
+            return Err(xous::Error::InvalidLimit);
+        }
         // The implementation of this is gross because we have to stuff the command list
-        assert!(data.len() < 256); // is is a conservative bound, the limit is due to the cmd buf length limit
         // into the pre-allocated Tx buf
         self.new_tranaction();
         self.push_cmd(I2cCmd::Config(self.divider));
@@ -448,7 +453,10 @@ impl<'a> I2cDriver<'a> {
         len: usize,
         repeated_start: bool,
     ) -> Result<usize, xous::Error> {
-        assert!(len < 256); // this is a conservative bound, actual limit is about 512 - 3 bytes
+        // a conservative bound, the actual limit is about 512 - 3 bytes
+        if len > MAX_I2C_TRANSFER {
+            return Err(xous::Error::InvalidLimit);
+        }
 
         // block has to be reset on every start transaction due to a... bug? programming error?
         // where the Rx length is mismatched from the actual length of Rx data expected because

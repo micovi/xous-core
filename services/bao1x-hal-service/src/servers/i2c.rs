@@ -69,29 +69,28 @@ fn i2c_service() -> ! {
                         continue;
                     };
                     for transaction in list.transactions.iter_mut() {
-                        match transaction.i2c_type {
+                        // the driver refuses a transfer longer than MAX_I2C_TRANSFER bytes
+                        let outcome = match transaction.i2c_type {
                             I2cTransactionType::Write => {
-                                match i2c.i2c_write(
-                                    transaction.device,
-                                    transaction.address,
-                                    &transaction.data,
-                                ) {
-                                    Ok(result) => transaction.result = result,
-                                    _ => transaction.result = I2cResult::Nack,
-                                }
+                                i2c.i2c_write(transaction.device, transaction.address, &transaction.data)
                             }
-                            I2cTransactionType::Read | I2cTransactionType::ReadRepeatedStart => {
-                                match i2c.i2c_read(
-                                    transaction.device,
-                                    transaction.address,
-                                    &mut transaction.data,
-                                    transaction.i2c_type == I2cTransactionType::ReadRepeatedStart,
-                                ) {
-                                    Ok(result) => transaction.result = result,
-                                    _ => transaction.result = I2cResult::Nack,
-                                }
-                            }
-                        }
+                            I2cTransactionType::Read | I2cTransactionType::ReadRepeatedStart => i2c.i2c_read(
+                                transaction.device,
+                                transaction.address,
+                                &mut transaction.data,
+                                transaction.i2c_type == I2cTransactionType::ReadRepeatedStart,
+                            ),
+                        };
+                        transaction.result = outcome.unwrap_or_else(|e| {
+                            log::warn!(
+                                "I2C: {} bytes for device {:#x} refused (at most {}): {:?}",
+                                transaction.data.len(),
+                                transaction.device,
+                                bao1x_hal::udma::MAX_I2C_TRANSFER,
+                                e
+                            );
+                            I2cResult::Nack
+                        });
                     }
                     if buf.replace(list).is_err() {
                         log::warn!("I2C: could not answer the transaction list");
