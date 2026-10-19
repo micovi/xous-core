@@ -10,6 +10,9 @@ use xous_api_susres::*;
 use xous_ipc::Buffer;
 
 static TIMEOUT_TIME: AtomicU32 = AtomicU32::new(5000);
+/// Suspend subscribers kept. Each one costs a connection of this process (the kernel gives a
+/// process 32), and any process may subscribe, so the list is bounded.
+const MAX_SUSPEND_SUBSCRIBERS: usize = 8;
 
 #[derive(Copy, Clone, Debug)]
 struct ScalarCallback {
@@ -142,7 +145,10 @@ fn susres_service() {
                     }
                 }
                 Some(Opcode::SuspendingNow) => {
-                    if suspend_requested.is_none() {
+                    // the gate is answered later, which only a blocking scalar can wait for
+                    if !(msg.body.is_blocking() && msg.body.scalar_message().is_some()) {
+                        log::warn!("SuspendingNow from PID {:?}: not a blocking scalar", msg.sender.pid());
+                    } else if suspend_requested.is_none() {
                         // this is harmless, it means a process' execution gate came a bit later than
                         // expected, so just ignore and tell it to resume
                         // the execution gate is only requested until *after* a process has checked in and
@@ -151,8 +157,7 @@ fn susres_service() {
                             "exec gate message received late from pid {:?}, ignoring",
                             msg.sender.pid()
                         );
-                        xous::return_scalar(msg.sender, 0)
-                            .expect("couldn't return dummy message to unblock execution");
+                        answer(msg.sender, 0, "SuspendingNow");
                     } else {
                         gated_pids.push(msg.sender);
                     }
@@ -271,16 +276,7 @@ fn susres_service() {
                     } else if all_ready {
                         log::info!("finished with {:?} going to next round", current_op_order);
                         // the current order is finished, send the next tranche
-                        current_op_order = current_op_order.next();
-                        let mut at_least_one_event_sent = false;
-                        while !at_least_one_event_sent {
-                            let (send_success, next_op_order) =
-                                send_event(&suspend_subscribers, current_op_order);
-                            if !send_success {
-                                current_op_order = next_op_order;
-                            }
-                            at_least_one_event_sent = send_success;
-                        }
+                        current_op_order = send_stage(&suspend_subscribers, current_op_order.next());
                         log::info!("Now waiting on {:?} stage", current_op_order);
                         // let the events fire
                         xous::yield_slice();
@@ -311,16 +307,8 @@ fn susres_service() {
                         xous::try_send_message(timeout_outgoing_conn, Message::new_scalar(0, 0, 0, 0, 0))
                             .ok();
 
-                        current_op_order = xous_api_susres::SuspendOrder::Early;
-                        let mut at_least_one_event_sent = false;
-                        while !at_least_one_event_sent {
-                            let (send_success, next_op_order) =
-                                send_event(&suspend_subscribers, current_op_order);
-                            if !send_success {
-                                current_op_order = next_op_order;
-                            }
-                            at_least_one_event_sent = send_success;
-                        }
+                        current_op_order =
+                            send_stage(&suspend_subscribers, xous_api_susres::SuspendOrder::Early);
                         // let the events fire
                         xous::yield_slice();
                     } else {
@@ -356,8 +344,7 @@ fn susres_service() {
                         }
 
                         for pid in gated_pids.drain(..) {
-                            xous::return_scalar(pid, 0)
-                                .expect("couldn't return dummy message to unblock execution");
+                            answer(pid, 0, "SuspendingNow");
                         }
 
                         // this unblocks the requestor of the suspend
@@ -380,11 +367,7 @@ fn susres_service() {
                             clean = false;
                         }
                     }
-                    if clean {
-                        xous::return_scalar(msg.sender, 1).expect("couldn't return WasSuspendClean result");
-                    } else {
-                        xous::return_scalar(msg.sender, 0).expect("couldn't return WasSuspendClean result");
-                    }
+                    answer(msg.sender, if clean { 1 } else { 0 }, "WasSuspendClean");
                 }),
                 Some(Opcode::SuspendAllow) => {
                     allow_suspend = true;
@@ -392,93 +375,15 @@ fn susres_service() {
                 Some(Opcode::SuspendDeny) => {
                     allow_suspend = false;
                 }
+                // neither the ship-mode nor the deep-sleep power-off is implemented in this service
                 Some(Opcode::PowerOff) => msg_scalar_unpack!(msg, shipmode, _, _, _, {
-                    if shipmode != 0 {
-                        // this should be the full power down - no RTC, no nothing - disconnect the battery
-                        // for shipment. Battery life should be "years" in this mode.
-                        // clk_mgr.force_power_off();
-                        todo!("implement force power off")
-                    } else {
-                        // this should be the deep sleep mode - battery is still connected, RTC running
-                        // battery life is 100+ hours in this mode but not long enough for safe shipping
-                        todo!("implement deep sleep")
-                    }
+                    log::warn!("PowerOff (ship mode {}) is not supported; ignoring", shipmode != 0);
                 }),
-                Some(Opcode::Quit) => break,
-                Some(Opcode::PlatformSpecific) => {
-                    if let xous::Message::BlockingScalar(xous::ScalarMessage {
-                        id: _id,
-                        arg1: op,
-                        arg2,
-                        arg3: _arg3,
-                        arg4: _arg4,
-                    }) = msg.body
-                    {
-                        let platform_op = FromPrimitive::from_usize(op);
-                        match platform_op {
-                            Some(ClockOp::GetVco) => {
-                                xous::return_scalar(msg.sender, clk_mgr.vco_freq as usize).unwrap()
-                            }
-                            Some(ClockOp::GetFclk) => {
-                                xous::return_scalar(msg.sender, clk_mgr.fclk as usize).unwrap()
-                            }
-                            Some(ClockOp::GetAclk) => {
-                                xous::return_scalar(msg.sender, clk_mgr.aclk as usize).unwrap()
-                            }
-                            Some(ClockOp::GetHclk) => {
-                                xous::return_scalar(msg.sender, clk_mgr.hclk as usize).unwrap()
-                            }
-                            Some(ClockOp::GetIclk) => {
-                                xous::return_scalar(msg.sender, clk_mgr.iclk as usize).unwrap()
-                            }
-                            Some(ClockOp::GetPclk) => {
-                                xous::return_scalar(msg.sender, clk_mgr.pclk as usize).unwrap()
-                            }
-                            Some(ClockOp::GetPer) => {
-                                xous::return_scalar(msg.sender, clk_mgr.perclk as usize).unwrap()
-                            }
-                            Some(ClockOp::SetFclk) => {
-                                const MAX_DEVIATION: f32 = 0.05;
-                                let requested_freq = arg2 as u32;
-                                let fclk_fd = fd_from_frequency(requested_freq, clk_mgr.clktop);
-                                let achievable_freq = divide_by_fd(fclk_fd, clk_mgr.clktop);
-                                if (1.0 - (achievable_freq as f32 / requested_freq as f32)).abs()
-                                    < MAX_DEVIATION
-                                {
-                                    clk_mgr.set_fclk_fd(fclk_fd as u8);
-                                    clk_mgr.update_clocks();
-                                    log::info!("Changed fclk to {}", clk_mgr.fclk);
-                                    xous::return_scalar2(msg.sender, 1, achievable_freq as usize).unwrap();
-                                } else {
-                                    // let user know closest achievable frequency
-                                    xous::return_scalar2(msg.sender, 0, achievable_freq as usize).unwrap();
-                                }
-                            }
-                            Some(ClockOp::ResetReason) => {
-                                xous::return_scalar(msg.sender, clk_mgr.reset_reason().raw_value() as usize)
-                                    .unwrap()
-                            }
-                            _ => panic!("Incorrect PlatformOp"),
-                        }
-                    }
-                    if let xous::Message::Scalar(xous::ScalarMessage {
-                        id: _id,
-                        arg1: op,
-                        arg2: _arg2,
-                        arg3: _arg3,
-                        arg4: _arg4,
-                    }) = msg.body
-                    {
-                        let platform_op = FromPrimitive::from_usize(op);
-                        match platform_op {
-                            Some(ClockOp::DeepSleep) => {
-                                clk_mgr.deep_sleep();
-                                // system is shut down after this point, no code runs
-                            }
-                            _ => panic!("Incorrect PlatformOp"),
-                        }
-                    }
+                // the server runs for as long as the system does; no process may stop it
+                Some(Opcode::Quit) => {
+                    log::warn!("Quit from PID {:?} refused", msg.sender.pid());
                 }
+                Some(Opcode::PlatformSpecific) => platform_specific(&mut clk_mgr, &msg),
                 None => {
                     log::error!("couldn't convert opcode");
                 }
@@ -516,7 +421,9 @@ fn send_event(
     for scb in cb_conns.iter() {
         if scb.order == order {
             at_least_one_event_sent = true;
-            xous::send_message(
+            // not `send_message`, which waits for room in the queue of a subscriber that may never
+            // read it; a subscriber that misses the event is caught by the suspend timeout
+            if let Err(e) = xous::try_send_message(
                 scb.server_to_cb_cid,
                 xous::Message::new_scalar(
                     SuspendEventCallback::Event.to_usize().unwrap(),
@@ -525,17 +432,38 @@ fn send_event(
                     scb.token as usize,
                     0,
                 ),
-            )
-            .unwrap();
+            ) {
+                log::warn!("suspend event to token {} not sent: {:?}", scb.token, e);
+            }
         }
     }
     (at_least_one_event_sent, order.next())
 }
 
+/// Sends the suspend event to the subscribers of `order`, or of the first later stage that has
+/// any, and returns that stage; `Last` when no stage from `order` on has a subscriber.
+fn send_stage(
+    cb_conns: &Vec<ScalarCallback>,
+    mut order: xous_api_susres::SuspendOrder,
+) -> xous_api_susres::SuspendOrder {
+    loop {
+        let (sent, next) = send_event(cb_conns, order);
+        if sent || order == xous_api_susres::SuspendOrder::Last {
+            return order;
+        }
+        order = next;
+    }
+}
+
 fn do_hook(hookdata: ScalarHook, cb_conns: &mut Vec<ScalarCallback>) {
+    if cb_conns.len() >= MAX_SUSPEND_SUBSCRIBERS {
+        log::warn!("suspend hook refused: already {} subscribers", cb_conns.len());
+        return;
+    }
     let (s0, s1, s2, s3) = hookdata.sid;
     let sid = xous::SID::from_u32(s0, s1, s2, s3);
-    let Ok(server_to_cb_cid) = xous::connect(sid) else {
+    // `connect` would wait for as long as no server has this SID
+    let Ok(server_to_cb_cid) = xous::try_connect(sid) else {
         log::warn!("suspend hook refused: no server to connect to");
         return;
     };
@@ -550,4 +478,72 @@ fn do_hook(hookdata: ScalarHook, cb_conns: &mut Vec<ScalarCallback>) {
     };
     log::trace!("hooking {:?}", cb_dat);
     cb_conns.push(cb_dat);
+}
+
+/// Answers a blocking scalar. The caller may have ended since it sent the message, so a failure
+/// is logged, not fatal.
+fn answer(sender: xous::MessageSender, value: usize, what: &str) {
+    if let Err(e) = xous::return_scalar(sender, value) {
+        log::warn!("{}: could not answer PID {:?}: {:?}", what, sender.pid(), e);
+    }
+}
+
+/// `PlatformSpecific`: the clock queries, `SetFclk` and `ResetReason` as blocking scalars and
+/// `DeepSleep` as a scalar. Any other request is logged and refused; a blocking one is answered 0.
+fn platform_specific(clk_mgr: &mut bao1x_hal::clocks::ClockManagerImpl, msg: &xous::MessageEnvelope) {
+    let sender = msg.sender;
+    match msg.body {
+        Message::BlockingScalar(xous::ScalarMessage { arg1: op, arg2, .. }) => {
+            let value = match FromPrimitive::from_usize(op) {
+                Some(ClockOp::GetVco) => clk_mgr.vco_freq,
+                Some(ClockOp::GetFclk) => clk_mgr.fclk,
+                Some(ClockOp::GetAclk) => clk_mgr.aclk,
+                Some(ClockOp::GetHclk) => clk_mgr.hclk,
+                Some(ClockOp::GetIclk) => clk_mgr.iclk,
+                Some(ClockOp::GetPclk) => clk_mgr.pclk,
+                Some(ClockOp::GetPer) => clk_mgr.perclk,
+                Some(ClockOp::ResetReason) => clk_mgr.reset_reason().raw_value() as u32,
+                Some(ClockOp::SetFclk) => {
+                    set_fclk(clk_mgr, sender, arg2 as u32);
+                    return;
+                }
+                Some(ClockOp::DeepSleep) | None => {
+                    log::warn!("PlatformSpecific: no blocking op {} (PID {:?})", op, sender.pid());
+                    0
+                }
+            };
+            answer(sender, value as usize, "PlatformSpecific");
+        }
+        Message::Scalar(xous::ScalarMessage { arg1: op, .. }) => match FromPrimitive::from_usize(op) {
+            // the system is shut down after this point, no code runs
+            Some(ClockOp::DeepSleep) => clk_mgr.deep_sleep(),
+            Some(_) => log::warn!("PlatformSpecific: op {} needs a blocking scalar", op),
+            None => log::warn!("PlatformSpecific: no op {} (PID {:?})", op, sender.pid()),
+        },
+        // a lent buffer goes back to its owner when the envelope drops
+        Message::MutableBorrow(_) | Message::Borrow(_) | Message::Move(_) => {
+            log::warn!("PlatformSpecific: not a scalar (PID {:?})", sender.pid());
+        }
+    }
+}
+
+/// `SetFclk`: changes fclk when `requested_freq` is within 5% of a reachable one. Answers
+/// (1, the new frequency), or (0, the closest reachable one) without a change.
+fn set_fclk(
+    clk_mgr: &mut bao1x_hal::clocks::ClockManagerImpl,
+    sender: xous::MessageSender,
+    requested_freq: u32,
+) {
+    const MAX_DEVIATION: f32 = 0.05;
+    let fclk_fd = fd_from_frequency(requested_freq, clk_mgr.clktop);
+    let achievable_freq = divide_by_fd(fclk_fd, clk_mgr.clktop);
+    let changed = (1.0 - (achievable_freq as f32 / requested_freq as f32)).abs() < MAX_DEVIATION;
+    if changed {
+        clk_mgr.set_fclk_fd(fclk_fd as u8);
+        clk_mgr.update_clocks();
+        log::info!("Changed fclk to {}", clk_mgr.fclk);
+    }
+    if let Err(e) = xous::return_scalar2(sender, changed as usize, achievable_freq as usize) {
+        log::warn!("SetFclk: could not answer PID {:?}: {:?}", sender.pid(), e);
+    }
 }
