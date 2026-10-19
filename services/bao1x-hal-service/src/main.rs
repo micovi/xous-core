@@ -557,13 +557,11 @@ fn main() {
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
                         let port: IoxPort = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
                         let value = scalar.arg2 as u16;
-                        #[cfg_attr(feature = "iox-claims", allow(unused_mut))]
-                        let mut bitmask = scalar.arg3 as u16;
                         // pins claimed by other processes are dropped from the write; the rest go through
                         #[cfg(feature = "iox-claims")]
-                        {
-                            bitmask = claims.write_mask(port, bitmask, pid);
-                        }
+                        let bitmask = claims.write_mask(port, scalar.arg3 as u16, pid);
+                        #[cfg(not(feature = "iox-claims"))]
+                        let bitmask = scalar.arg3 as u16;
                         if bitmask != 0 {
                             iox.set_gpio_bank(port, value, bitmask);
                         }
@@ -574,13 +572,11 @@ fn main() {
                     let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
                         let port: IoxPort = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
-                        #[cfg_attr(feature = "iox-claims", allow(unused_mut))]
-                        let mut value = iox.get_gpio_bank(port);
                         // pins claimed by other processes read as 0
                         #[cfg(feature = "iox-claims")]
-                        {
-                            value &= claims.read_mask(port, pid);
-                        }
+                        let value = iox.get_gpio_bank(port) & claims.read_mask(port, pid);
+                        #[cfg(not(feature = "iox-claims"))]
+                        let value = iox.get_gpio_bank(port);
                         scalar.arg1 = value as usize;
                     }
                 }
