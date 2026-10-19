@@ -33,7 +33,6 @@ bitfield! {
 }
 fn irq_select_from_port(port: IoxPort, pin: u8) -> u32 { (port as u32) * 16 + pin as u32 }
 /// The PID the kernel stamped on the message; 0 when there is none (a kernel-originated message).
-#[cfg(feature = "iox-claims")]
 fn sender_pid(sender: &Sender) -> u8 { sender.pid().map(|pid| pid.get()).unwrap_or(0) }
 fn find_first_none<T>(arr: &[Option<T>]) -> Option<usize> { arr.iter().position(|item| item.is_none()) }
 /// Pins per IOX port; the IOX register helpers assert a pin below this.
@@ -75,6 +74,8 @@ fn ifram_pages(phys_addr: usize, size: usize) -> Option<(usize, usize, usize)> {
 #[derive(Debug)]
 #[allow(dead_code)]
 struct IrqLocalRegistration {
+    /// The PID that registered the interrupt; 0 when the kernel stamped none.
+    pub pid: u8,
     pub cid: xous::CID,
     pub opcode: usize,
     pub port: IoxPort,
@@ -295,6 +296,10 @@ fn main() {
 
         #[cfg(feature = "iox-claims")]
         let mut claims = IoxClaims::new();
+        // the IOX interrupt handler of this process is the only legitimate sender of
+        // `IrqLocalHandler`
+        #[cfg(feature = "iox-claims")]
+        let own_pid = xous::process::id() as u8;
 
         let mut msg_opt = None;
         log::debug!("Starting main loop");
@@ -364,6 +369,8 @@ fn main() {
                     }
                 }
                 HalOpcode::UnmapIfram => {
+                    #[cfg(feature = "iox-claims")]
+                    let sender = msg_opt.as_ref().unwrap().sender;
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
                         let mapped_size = scalar.arg1;
                         let phys_addr = scalar.arg2;
@@ -376,6 +383,16 @@ fn main() {
                             continue;
                         };
                         let pages = &mut ifram_allocs[bank][first..first + count];
+                        // only the process that was given the pages may give them back
+                        #[cfg(feature = "iox-claims")]
+                        if pages.iter().any(|owner| owner.and_then(|o| o.pid()) != sender.pid()) {
+                            log::warn!(
+                                "PID {} may not unmap IFRAM at 0x{:x}: allocated to another process",
+                                sender_pid(&sender),
+                                phys_addr
+                            );
+                            continue;
+                        }
                         for record in pages.iter_mut() {
                             *record = None;
                         }
@@ -429,6 +446,7 @@ fn main() {
                     }
                 }
                 HalOpcode::ConfigureIoxIrq => {
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     let Some(mem) = msg_opt.as_mut().unwrap().body.memory_message_mut() else {
                         log::warn!("ConfigureIoxIrq: not a memory message");
                         continue;
@@ -438,12 +456,23 @@ fn main() {
                         log::warn!("ConfigureIoxIrq: malformed registration");
                         continue;
                     };
-                    log::info!("Got registration request: {:?}", registration);
+                    log::info!("Got registration request from PID {}: {:?}", pid, registration);
                     // `index` stays `None` on every refusal, which is what the caller reads back
                     registration.index = None;
                     let free_slot = find_first_none(&irq_table);
+                    #[cfg(feature = "iox-claims")]
+                    let claimed = !claims.allows(registration.port, registration.pin, pid);
+                    #[cfg(not(feature = "iox-claims"))]
+                    let claimed = false;
                     if registration.pin >= IOX_PINS {
                         log::warn!("IRQ refused: no pin {} on {:?}", registration.pin, registration.port);
+                    } else if claimed {
+                        log::warn!(
+                            "IRQ refused: PID {} may not watch {:?}{}, claimed by another process",
+                            pid,
+                            registration.port,
+                            registration.pin
+                        );
                     } else if free_slot.is_none() {
                         log::warn!("IRQ refused: all {} Iox interrupt slots are in use", IOX_IRQ_SLOTS);
                     } else if let (Some(index), Ok(local_conn)) =
@@ -451,6 +480,7 @@ fn main() {
                     {
                         // create the reverse-lookup registration
                         let local_reg = IrqLocalRegistration {
+                            pid,
                             cid: local_conn,
                             opcode: registration.opcode,
                             port: registration.port,
@@ -483,6 +513,8 @@ fn main() {
                     }
                 }
                 HalOpcode::UpdateIoxIrq => {
+                    #[cfg(feature = "iox-claims")]
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     let Some(mem) = msg_opt.as_ref().unwrap().body.memory_message() else {
                         log::warn!("UpdateIoxIrq: not a memory message");
                         continue;
@@ -494,6 +526,12 @@ fn main() {
                     };
                     log::debug!("Got IRQ update request: {:?}", update);
                     if let Some(Some(reg)) = irq_table.get_mut(update.index) {
+                        // only the registering process may change its registration
+                        #[cfg(feature = "iox-claims")]
+                        if reg.pid != pid {
+                            log::warn!("PID {} may not update IRQ slot {}", pid, update.index);
+                            continue;
+                        }
                         if reg.server == update.server {
                             if let Some(active) = update.active {
                                 reg.active = active;
@@ -526,6 +564,11 @@ fn main() {
                     }
                 }
                 HalOpcode::IrqLocalHandler => {
+                    #[cfg(feature = "iox-claims")]
+                    if sender_pid(&msg_opt.as_ref().unwrap().sender) != own_pid {
+                        log::warn!("IrqLocalHandler refused: sent by another process");
+                        continue;
+                    }
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
                         // Figure out which port(s) caused the IRQ
                         let irq_flag = iox.csr.r(utralib::utra::iox::SFR_INTFR);
@@ -622,10 +665,47 @@ fn main() {
                             Some(port) if pid != 0 => match claims.claim(port, pins, pid) {
                                 Ok(()) => {
                                     log::info!("PID {} claimed {:?} pins {:#06x}", pid, port, pins);
+                                    // edge interrupts other processes registered on these pins
+                                    // before the claim stop here
+                                    for (index, slot) in irq_table.iter_mut().enumerate() {
+                                        if let Some(reg) = slot {
+                                            if !claims.allows(reg.port, reg.pin, reg.pid) {
+                                                log::warn!(
+                                                    "IRQ slot {} of PID {} on {:?}{} revoked by the claim",
+                                                    index,
+                                                    reg.pid,
+                                                    reg.port,
+                                                    reg.pin
+                                                );
+                                                write_int_cr(&iox, index, 0);
+                                                *slot = None;
+                                            }
+                                        }
+                                    }
                                     0
                                 }
                                 Err(ClaimError::Owned { pins }) => {
                                     log::warn!("PID {} refused {:?} pins {:#06x}: claimed", pid, port, pins);
+                                    1
+                                }
+                            },
+                            _ => 2,
+                        };
+                    }
+                }
+                #[cfg(feature = "iox-claims")]
+                HalOpcode::ClaimPeriph => {
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
+                    if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
+                        let periph: Option<PeriphId> = num_traits::FromPrimitive::from_usize(scalar.arg1);
+                        scalar.arg1 = match periph {
+                            Some(periph) if pid != 0 => match claims.claim_periph(periph, pid) {
+                                Ok(()) => {
+                                    log::info!("PID {} claimed {:?}", pid, periph);
+                                    0
+                                }
+                                Err(PeriphClaimError::Owned) => {
+                                    log::warn!("PID {} refused {:?}: claimed", pid, periph);
                                     1
                                 }
                             },
@@ -660,11 +740,18 @@ fn main() {
                     }
                 }
                 HalOpcode::ConfigureUdmaClock => {
+                    #[cfg(feature = "iox-claims")]
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
                         let Some(periph) = PeriphId::from_usize(scalar.arg1) else {
                             log::warn!("ConfigureUdmaClock: no peripheral {:#x}", scalar.arg1);
                             continue;
                         };
+                        #[cfg(feature = "iox-claims")]
+                        if !claims.periph_allows(periph, pid) {
+                            log::warn!("PID {} may not gate the clock of {:?}: claimed", pid, periph);
+                            continue;
+                        }
                         let enable = if scalar.arg2 != 0 { true } else { false };
                         if enable {
                             udma_global.clock_on(periph);
@@ -674,6 +761,8 @@ fn main() {
                     }
                 }
                 HalOpcode::ConfigureUdmaEvent => {
+                    #[cfg(feature = "iox-claims")]
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
                         let periph: Option<PeriphId> = num_traits::FromPrimitive::from_usize(scalar.arg1);
                         let to_channel: Option<EventChannel> =
@@ -686,6 +775,11 @@ fn main() {
                             );
                             continue;
                         };
+                        #[cfg(feature = "iox-claims")]
+                        if !claims.periph_allows(periph, pid) {
+                            log::warn!("PID {} may not map the events of {:?}: claimed", pid, periph);
+                            continue;
+                        }
                         let event_offset = scalar.arg2 as u32;
                         // note: no "air traffic control" is done to prevent mapping other
                         // events. Maybe this should be done? but for now, let's leave it
@@ -705,11 +799,18 @@ fn main() {
                     }
                 }
                 HalOpcode::PeriphReset => {
+                    #[cfg(feature = "iox-claims")]
+                    let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
                         let Some(periph) = PeriphId::from_usize(scalar.arg1) else {
                             log::warn!("PeriphReset: no peripheral {:#x}", scalar.arg1);
                             continue;
                         };
+                        #[cfg(feature = "iox-claims")]
+                        if !claims.periph_allows(periph, pid) {
+                            log::warn!("PID {} may not reset {:?}: claimed", pid, periph);
+                            continue;
+                        }
                         udma_global.reset(periph);
                     }
                 }

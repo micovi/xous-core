@@ -266,6 +266,27 @@ impl IoxHal {
         }
     }
 
+    /// Claims the UDMA peripheral `periph` for the calling process, for its lifetime. The
+    /// HAL service then refuses to reset it, gate its clock or remap its events for any
+    /// other process.
+    #[cfg(feature = "iox-claims")]
+    pub fn claim_periph(&self, periph: crate::PeriphId) -> Result<(), PeriphClaimError> {
+        match xous::send_message(
+            self.conn,
+            xous::Message::new_blocking_scalar(
+                HalOpcode::ClaimPeriph.to_usize().unwrap(),
+                periph as u32 as usize,
+                0,
+                0,
+                0,
+            ),
+        ) {
+            Ok(xous::Result::Scalar5(_, 0, _, _, _)) => Ok(()),
+            Ok(xous::Result::Scalar5(_, 1, _, _, _)) => Err(PeriphClaimError::Owned),
+            _ => panic!("Internal Error: Couldn't claim a UDMA peripheral"),
+        }
+    }
+
     /// This function takes a 32-bit bitmask, corresponding to BIO 31 through 0, where
     /// a `1` indicates to map that BIO to a GPIO.
     ///

@@ -48,6 +48,12 @@ pub enum HalOpcode {
     /// of the pins, 2 when the request is malformed.
     #[cfg(feature = "iox-claims")]
     ClaimIox = 19,
+    /// Claim a UDMA peripheral for the calling process (blocking scalar: the `PeriphId`
+    /// value). The service then refuses `PeriphReset`, `ConfigureUdmaClock` and
+    /// `ConfigureUdmaEvent` on it for any other process. Answers 0 when claimed, 1 when
+    /// another process owns it, 2 when the request is malformed.
+    #[cfg(feature = "iox-claims")]
+    ClaimPeriph = 20,
 
     /// Peripheral reset
     PeriphReset = 10,
