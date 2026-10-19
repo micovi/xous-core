@@ -10,6 +10,10 @@ use rand::RngCore;
 use xous::CID;
 use xous_ipc::Buffer;
 
+/// TRNG error subscribers kept. Any process may subscribe, and each costs a connection of this
+/// process (the kernel gives a process 32), so the list is bounded.
+const MAX_ERROR_SUBSCRIBERS: usize = 4;
+
 #[derive(Copy, Clone, Debug)]
 #[allow(dead_code)]
 struct ScalarCallback {
@@ -46,40 +50,41 @@ fn trng_service() -> ! {
         log::debug!("{:?}", op);
         match op {
             Some(api::Opcode::GetTrng) => xous::msg_blocking_scalar_unpack!(msg, count, _, _, _, {
-                if count == 1 {
-                    xous::return_scalar2(msg.sender, trng.next_u32() as usize, 0xdead_beef)
-                        .expect("couldn't return GetTrng request");
-                } else {
-                    xous::return_scalar2(msg.sender, trng.next_u32() as usize, trng.next_u32() as usize)
-                        .expect("couldn't return GetTrng request");
-                }
+                let first = trng.next_u32() as usize;
+                let second = if count == 1 { 0xdead_beef } else { trng.next_u32() as usize };
+                answer_words(msg.sender, first, second);
             }),
             Some(api::Opcode::ErrorSubscribe) => {
-                let buffer = unsafe { Buffer::from_memory_message(msg.body.memory_message().unwrap()) };
-                let hookdata = buffer.to_original::<api::ScalarHook, _>().unwrap();
-                do_hook(hookdata, &mut error_cb_conns);
+                let Some(mem) = msg.body.memory_message() else {
+                    log::warn!("ErrorSubscribe: not a memory message");
+                    continue;
+                };
+                let buffer = unsafe { Buffer::from_memory_message(mem) };
+                match buffer.to_original::<api::ScalarHook, _>() {
+                    Ok(hookdata) => do_hook(hookdata, &mut error_cb_conns),
+                    Err(_) => log::warn!("ErrorSubscribe: malformed hook"),
+                }
             }
-            Some(api::Opcode::ErrorNotification) => {
-                log::error!("Got a notification interrupt from the TRNG. Syndrome: {:?}", trng.get_errors());
-                log::error!("Stats: {:?}", trng.get_tests());
-                send_event(&error_cb_conns);
-            }
-            Some(api::Opcode::HealthStats) => {
-                let mut buffer =
-                    unsafe { Buffer::from_memory_message_mut(msg.body.memory_message_mut().unwrap()) };
-                buffer.replace(trng.get_tests()).unwrap();
-            }
-            Some(api::Opcode::ErrorStats) => {
-                let mut buffer =
-                    unsafe { Buffer::from_memory_message_mut(msg.body.memory_message_mut().unwrap()) };
-                buffer.replace(trng.get_errors()).unwrap();
+            // HwTrng keeps no health or error statistics yet (`get_tests` and `get_errors` are
+            // `todo!()`), and the notification is sent by no interrupt handler
+            Some(api::Opcode::ErrorNotification)
+            | Some(api::Opcode::HealthStats)
+            | Some(api::Opcode::ErrorStats) => {
+                log::warn!("{:?} is not available on this board", op);
             }
             Some(api::Opcode::FillTrng) => {
-                let mm = msg.body.memory_message_mut().unwrap();
-                let buffer =
-                    api::IpcTrngBuf::from_memory_message_mut(mm).expect("couldn't unpack FillTrng buffer");
-                let len = buffer.len as usize;
-                trng.fill_buf(&mut buffer.data[..len]).expect("couldn't fill TRNG buffer");
+                let Some(mm) = msg.body.memory_message_mut() else {
+                    log::warn!("FillTrng: not a memory message");
+                    continue;
+                };
+                let Some(buffer) = api::IpcTrngBuf::from_memory_message_mut(mm) else {
+                    log::warn!("FillTrng: malformed buffer");
+                    continue;
+                };
+                let len = (buffer.len as usize).min(buffer.data.len());
+                if let Err(e) = trng.fill_buf(&mut buffer.data[..len]) {
+                    log::warn!("FillTrng: {:?}", e);
+                }
             }
             None => {
                 log::error!("couldn't convert opcode, ignoring");
@@ -112,17 +117,11 @@ fn trng_service() -> ! {
         log::debug!("{:?}", op);
         match op {
             Some(api::Opcode::GetTrng) => xous::msg_blocking_scalar_unpack!(msg, count, _, _, _, {
-                if count == 1 {
-                    xous::return_scalar2(msg.sender, trng.get_u32().unwrap() as usize, 0xdead_beef)
-                        .expect("couldn't return GetTrng request");
-                } else {
-                    xous::return_scalar2(
-                        msg.sender,
-                        trng.get_u32().unwrap() as usize,
-                        trng.get_u32().unwrap() as usize,
-                    )
-                    .expect("couldn't return GetTrng request");
-                }
+                // `Trng::get_u32` never fails: it draws from a ChaCha generator
+                let first = trng.get_u32().unwrap_or_default() as usize;
+                let second =
+                    if count == 1 { 0xdead_beef } else { trng.get_u32().unwrap_or_default() as usize };
+                answer_words(msg.sender, first, second);
             }),
             Some(api::Opcode::ErrorSubscribe) => {
                 let Some(mem) = msg.body.memory_message() else {
@@ -151,7 +150,9 @@ fn trng_service() -> ! {
                     continue;
                 };
                 let len = (buffer.len as usize).min(buffer.data.len());
-                trng.fill_buf(&mut buffer.data[..len]).expect("couldn't fill TRNG buffer");
+                if let Err(e) = trng.fill_buf(&mut buffer.data[..len]) {
+                    log::warn!("FillTrng: {:?}", e);
+                }
             }
             None => {
                 log::error!("couldn't convert opcode, ignoring");
@@ -160,10 +161,23 @@ fn trng_service() -> ! {
     }
 }
 
+/// Answers a `GetTrng` request. The caller may have ended since it sent the message, so a failure
+/// is logged, not fatal.
+fn answer_words(sender: xous::MessageSender, first: usize, second: usize) {
+    if let Err(e) = xous::return_scalar2(sender, first, second) {
+        log::warn!("GetTrng: could not answer PID {:?}: {:?}", sender.pid(), e);
+    }
+}
+
 fn do_hook(hookdata: api::ScalarHook, cb_conns: &mut Vec<ScalarCallback>) {
+    if cb_conns.len() >= MAX_ERROR_SUBSCRIBERS {
+        log::warn!("TRNG error hook refused: already {} subscribers", cb_conns.len());
+        return;
+    }
     let (s0, s1, s2, s3) = hookdata.sid;
     let sid = xous::SID::from_u32(s0, s1, s2, s3);
-    let Ok(server_to_cb_cid) = xous::connect(sid) else {
+    // `connect` would wait for as long as no server has this SID
+    let Ok(server_to_cb_cid) = xous::try_connect(sid) else {
         log::warn!("TRNG error hook refused: no server to connect to");
         return;
     };
