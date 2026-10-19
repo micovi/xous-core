@@ -60,7 +60,9 @@ fn rtc_service() -> ! {
     let mut msg_opt = None;
     let mut return_type = 0;
     loop {
-        xous::reply_and_receive_next_legacy(pub_sid, &mut msg_opt, &mut return_type).unwrap();
+        if !crate::servers::next_message(pub_sid, &mut msg_opt, &mut return_type, "time server") {
+            continue;
+        }
         let msg = msg_opt.as_mut().unwrap();
         let opcode: Option<TimeOp> = num_traits::FromPrimitive::from_usize(msg.body.id());
         log::debug!("{:?}", opcode);

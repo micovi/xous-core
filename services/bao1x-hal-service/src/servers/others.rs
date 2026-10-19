@@ -30,7 +30,9 @@ fn peri_service() -> ! {
     let mut msg_opt = None;
 
     loop {
-        xous::reply_and_receive_next(sid, &mut msg_opt).unwrap();
+        if !crate::servers::next_message(sid, &mut msg_opt, &mut 0, "peripherals") {
+            continue;
+        }
         let opcode = {
             let msg = msg_opt.as_mut().unwrap();
             num_traits::FromPrimitive::from_usize(msg.body.id()).unwrap_or(PeripheralOpcode::InvalidCall)

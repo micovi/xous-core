@@ -214,7 +214,9 @@ fn keyboard_bouncer() {
     let kbd = bao1x_api::keyboard::Keyboard::new(&xns).unwrap();
     let mut msg_opt = None;
     loop {
-        xous::reply_and_receive_next(sid, &mut msg_opt).unwrap();
+        if !crate::servers::next_message(sid, &mut msg_opt, &mut 0, "keyboard bouncer") {
+            continue;
+        }
         let msg = msg_opt.as_mut().unwrap();
         // only one type of message is expected
         match msg.body.scalar_message() {

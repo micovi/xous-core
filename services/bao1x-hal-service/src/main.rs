@@ -120,6 +120,22 @@ fn timer_tick(_irq_no: usize, arg: *mut usize) {
     timer.wfo(utra::timer0::EV_PENDING_ZERO, 0b1);
 }
 
+/// The connection to the server `name` in `cache`, made on first use; `None`, logged, when the
+/// server cannot be reached.
+fn cached_connection(
+    xns: &xous_names::XousNames,
+    cache: &mut Option<xous::CID>,
+    name: &str,
+) -> Option<xous::CID> {
+    if cache.is_none() {
+        match xns.request_connection_blocking(name) {
+            Ok(cid) => *cache = Some(cid),
+            Err(e) => log::warn!("no connection to {}: {:?}", name, e),
+        }
+    }
+    *cache
+}
+
 fn try_alloc(ifram_allocs: &mut Vec<Option<Sender>>, size: usize, sender: Sender) -> Option<usize> {
     let mut size_pages = size / 4096;
     if size % 4096 != 0 {
@@ -314,7 +330,9 @@ fn main() {
         let mut msg_opt = None;
         log::debug!("Starting main loop");
         loop {
-            xous::reply_and_receive_next(sid, &mut msg_opt).unwrap();
+            if !servers::next_message(sid, &mut msg_opt, &mut 0, "HAL") {
+                continue;
+            }
             // this loop uses a unique form of reply_and_receive next that allows us to store and delegate
             // scalar messages if necessary (that feature is currently unused). To do this, .take() the
             // msg_opt and store it in a Vec; then use an explicit rsyscall to do a
@@ -851,38 +869,35 @@ fn main() {
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
                         // lazily fill in these connections on demand. This prevents race conditions on
                         // process startup.
-                        let i2c_cid = i2c_conn.get_or_insert_with(|| {
-                            xns.request_connection_blocking(SERVER_NAME_BAO1X_I2C)
-                                .expect("Couldn't connect to bao1x I2C server")
-                        });
-                        let peri_cid = peri_conn.get_or_insert_with(|| {
-                            xns.request_connection_blocking(SERVER_NAME_BAO1X_OTHERS)
-                                .expect("Couldn't connect to bao1x misc peri server")
-                        });
-
                         // forward to peri block
-                        xous::send_message(
-                            *peri_cid,
-                            xous::Message::new_blocking_scalar(
-                                PeripheralOpcode::UpdatePerclk.to_usize().unwrap(),
-                                scalar.arg1,
-                                0,
-                                0,
-                                0,
-                            ),
-                        )
-                        .ok();
-                        xous::send_message(
-                            *i2c_cid,
-                            xous::Message::new_blocking_scalar(
-                                I2cOpcode::UpdatePerclk.to_usize().unwrap(),
-                                scalar.arg1,
-                                0,
-                                0,
-                                0,
-                            ),
-                        )
-                        .ok();
+                        if let Some(peri_cid) =
+                            cached_connection(&xns, &mut peri_conn, SERVER_NAME_BAO1X_OTHERS)
+                        {
+                            xous::send_message(
+                                peri_cid,
+                                xous::Message::new_blocking_scalar(
+                                    PeripheralOpcode::UpdatePerclk.to_usize().unwrap(),
+                                    scalar.arg1,
+                                    0,
+                                    0,
+                                    0,
+                                ),
+                            )
+                            .ok();
+                        }
+                        if let Some(i2c_cid) = cached_connection(&xns, &mut i2c_conn, SERVER_NAME_BAO1X_I2C) {
+                            xous::send_message(
+                                i2c_cid,
+                                xous::Message::new_blocking_scalar(
+                                    I2cOpcode::UpdatePerclk.to_usize().unwrap(),
+                                    scalar.arg1,
+                                    0,
+                                    0,
+                                    0,
+                                ),
+                            )
+                            .ok();
+                        }
                     }
                 }
                 HalOpcode::InvalidCall => {
