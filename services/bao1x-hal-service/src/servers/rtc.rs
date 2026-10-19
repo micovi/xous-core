@@ -3,6 +3,7 @@ use utralib::*;
 
 use crate::api::TIME_SERVER_PUBLIC;
 use crate::api::TimeOp;
+use crate::api::WAKEUP_REFUSED;
 
 pub fn start_rtc_service() {
     let _ = std::thread::spawn({
@@ -21,14 +22,17 @@ fn rtc_code_to_ms(rtc_code: u32, rollovers: u32) -> i64 {
     ((rtc_code as i64 + ((rollovers as i64) << 32)) * 1000) / 1024
 }
 
-fn ms_to_rtc_code(ms: i64) -> (u32, u32) {
-    assert!(ms >= 0, "can't set alarm to negative times");
-    // multiply before dividing to avoid losing sub-second precision.
-    // ms * 1024 is safe vs i64 overflow for any realistic UTC timestamp.
-    let codes = (ms * 1024) / 1000;
+/// The RTC code and rollover count of `ms`; `None` for a negative time or one too large to
+/// convert.
+fn ms_to_rtc_code(ms: i64) -> Option<(u32, u32)> {
+    if ms < 0 {
+        return None;
+    }
+    // multiply before dividing to avoid losing sub-second precision
+    let codes = ms.checked_mul(1024)? / 1000;
     let rtc_code = (codes & 0xFFFF_FFFF) as u32;
     let rollovers = (codes >> 32) as u32;
-    (rtc_code, rollovers)
+    Some((rtc_code, rollovers))
 }
 
 fn rtc_service() -> ! {
@@ -161,22 +165,26 @@ fn rtc_service() -> ! {
             }
             Some(TimeOp::SetWakeup) => {
                 if let Some(scalar) = msg.body.scalar_message_mut() {
-                    // just in case of race condition...
-                    rtc.wo(IMSC, 0); // disable the interrupt
-                    rtc.wo(ICR, 1); // clear the interrupt
-
                     let utc_hi_ms = scalar.arg1;
                     let utc_lo_ms = scalar.arg2;
                     let utc_time_ms = (utc_hi_ms as i64) << 32 | (utc_lo_ms as i64);
 
-                    let (rtc_code, rollovers) = ms_to_rtc_code(utc_time_ms);
-
+                    let Some((rtc_code, rollovers)) = ms_to_rtc_code(utc_time_ms) else {
+                        log::warn!("SetWakeup: no alarm at {} ms", utc_time_ms);
+                        scalar.arg1 = WAKEUP_REFUSED;
+                        continue;
+                    };
                     // don't allow alarms that are too close to the current time, the system is not
                     // precise enough to handle. currently set to 2 seconds (2048 ticks).
-                    assert!(
-                        rtc_code - rtc_val_atomic > 2048,
-                        "Edge case: need handling for alarm time too close to RTC time"
-                    );
+                    if rtc_code.wrapping_sub(rtc_val_atomic) <= 2048 {
+                        log::warn!("SetWakeup: alarm code {} too close to {}", rtc_code, rtc_val_atomic);
+                        scalar.arg1 = WAKEUP_REFUSED;
+                        continue;
+                    }
+                    // just in case of race condition...
+                    rtc.wo(IMSC, 0); // disable the interrupt
+                    rtc.wo(ICR, 1); // clear the interrupt
+
                     log::debug!(
                         "wakeup setting: code {}, rovers {}; current code {}",
                         rtc_code,

@@ -182,6 +182,9 @@ impl Rtc {
                 0,
             ),
         ) {
+            Ok(xous::Result::Scalar5(_op, crate::api::WAKEUP_REFUSED, _, _, _)) => {
+                Err(xous::Error::InvalidLimit)
+            }
             Ok(xous::Result::Scalar5(_op, epochs, _, _, _)) => Ok(epochs),
             _ => Err(xous::Error::InternalError),
         }

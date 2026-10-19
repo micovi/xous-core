@@ -2,6 +2,10 @@
 /// Anyone who wants to check if time has been initialized would use this name.
 pub const TIME_SERVER_PUBLIC: &'static [u8; 16] = b"timeserverpublic";
 
+/// The `SetWakeup` answer for an alarm that was refused and not armed: a negative time, one too
+/// large to convert, or one within two seconds of the RTC.
+pub const WAKEUP_REFUSED: usize = usize::MAX;
+
 /// Do not modify the discriminants in this structure. They are used in `libstd` directly.
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug)]
 pub enum TimeOp {
@@ -21,7 +25,7 @@ pub enum TimeOp {
     /// Serialize the internal state for storage across reboots
     GetState = 1024,
     /// Sets a wakeup alarm. Returns # of RTC rollover events that must
-    /// elapse before the alarm is actually valid.
+    /// elapse before the alarm is actually valid, or `WAKEUP_REFUSED`.
     SetWakeup = 1025,
     /// Clears any pending alarm
     ClearWakeup = 1026,
