@@ -373,8 +373,15 @@ fn keyboard_service() {
                 blocking_listener.push(msg.sender);
             }
             Some(KeyboardOpcode::RegisterListener) => {
-                let buffer = unsafe { Buffer::from_memory_message(msg.body.memory_message().unwrap()) };
-                let kr = buffer.as_flat::<KeyboardRegistration, _>().unwrap();
+                let Some(mem) = msg.body.memory_message() else {
+                    log::warn!("RegisterListener: not a memory message");
+                    continue;
+                };
+                let buffer = unsafe { Buffer::from_memory_message(mem) };
+                let Ok(kr) = buffer.as_flat::<KeyboardRegistration, _>() else {
+                    log::warn!("RegisterListener: malformed registration");
+                    continue;
+                };
                 match xns.request_connection_blocking(kr.server_name.as_str()) {
                     Ok(cid) => {
                         log::info!("keyboard listener {} -> {}", kr.server_name, cid);
@@ -386,9 +393,12 @@ fn keyboard_service() {
                 }
             }
             Some(KeyboardOpcode::RegisterKeyObserver) => {
-                if msg.body.has_memory() {
-                    let buffer = unsafe { Buffer::from_memory_message(msg.body.memory_message().unwrap()) };
-                    let kr = buffer.as_flat::<KeyboardRegistration, _>().unwrap();
+                if let Some(mem) = msg.body.memory_message() {
+                    let buffer = unsafe { Buffer::from_memory_message(mem) };
+                    let Ok(kr) = buffer.as_flat::<KeyboardRegistration, _>() else {
+                        log::warn!("RegisterKeyObserver: malformed registration");
+                        continue;
+                    };
                     if observer_conn.is_none() {
                         match xns.request_connection_blocking(kr.server_name.as_str()) {
                             Ok(cid) => {
@@ -414,7 +424,7 @@ fn keyboard_service() {
             Some(KeyboardOpcode::SelectKeyMap) => {
                 // only one key map for the input keyboard. Key mapping for translation of
                 // key presess to USB key codes should be set in the USB stack, not here.
-                unimplemented!()
+                log::warn!("SelectKeyMap is not supported; ignoring");
             }
             Some(KeyboardOpcode::GetKeyMap) => msg_blocking_scalar_unpack!(msg, _, _, _, _, {
                 log::warn!("Defaulting to DVORAK map");
@@ -427,12 +437,14 @@ fn keyboard_service() {
             }),
             #[cfg(not(feature = "board-baosec"))]
             Some(KeyboardOpcode::SetRepeat) => {
-                msg_scalar_unpack!(msg, _rate, _delay, _, _, { unimplemented!() })
+                msg_scalar_unpack!(msg, _rate, _delay, _, _, {
+                    log::warn!("SetRepeat is not supported on this board; ignoring")
+                })
             }
             Some(KeyboardOpcode::SetChordInterval) => msg_scalar_unpack!(msg, _delay, _, _, _, {
                 // chording allows us to interpret multiple key hits as a whole new separate key.
                 // for now we don't implement this feature.
-                unimplemented!()
+                log::warn!("SetChordInterval is not supported; ignoring");
             }),
             Some(KeyboardOpcode::InjectKey) => msg_scalar_unpack!(msg, k, _, _, _, {
                 // key substitutions to help things work better

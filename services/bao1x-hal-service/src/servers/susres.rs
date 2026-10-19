@@ -129,11 +129,17 @@ fn susres_service() {
                 Some(Opcode::RebootSocConfirm) => {
                     log::error!("RebootSocConfirm, but no prior Request. Ignoring.");
                 }
-                Some(Opcode::RebootVector) => unimplemented!(),
+                Some(Opcode::RebootVector) => log::warn!("RebootVector is not supported; ignoring"),
                 Some(Opcode::SuspendEventSubscribe) => {
-                    let buffer = unsafe { Buffer::from_memory_message(msg.body.memory_message().unwrap()) };
-                    let hookdata = buffer.to_original::<ScalarHook, _>().unwrap();
-                    do_hook(hookdata, &mut suspend_subscribers);
+                    let Some(mem) = msg.body.memory_message() else {
+                        log::warn!("SuspendEventSubscribe: not a memory message");
+                        continue;
+                    };
+                    let buffer = unsafe { Buffer::from_memory_message(mem) };
+                    match buffer.to_original::<ScalarHook, _>() {
+                        Ok(hookdata) => do_hook(hookdata, &mut suspend_subscribers),
+                        Err(_) => log::warn!("SuspendEventSubscribe: malformed hook"),
+                    }
                 }
                 Some(Opcode::SuspendingNow) => {
                     if suspend_requested.is_none() {
@@ -161,7 +167,8 @@ fn susres_service() {
                         continue;
                     }
                     if token >= suspend_subscribers.len() {
-                        panic!("received a SuspendReady token that's out of range");
+                        log::error!("received a SuspendReady token that's out of range: {}", token);
+                        continue;
                     }
                     let scb = &mut suspend_subscribers[token];
                     if scb.ready_to_suspend {
@@ -528,7 +535,10 @@ fn send_event(
 fn do_hook(hookdata: ScalarHook, cb_conns: &mut Vec<ScalarCallback>) {
     let (s0, s1, s2, s3) = hookdata.sid;
     let sid = xous::SID::from_u32(s0, s1, s2, s3);
-    let server_to_cb_cid = xous::connect(sid).unwrap();
+    let Ok(server_to_cb_cid) = xous::connect(sid) else {
+        log::warn!("suspend hook refused: no server to connect to");
+        return;
+    };
     let cb_dat = ScalarCallback {
         server_to_cb_cid,
         cb_to_client_cid: hookdata.cid,
