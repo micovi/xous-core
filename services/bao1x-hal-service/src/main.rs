@@ -36,6 +36,41 @@ fn irq_select_from_port(port: IoxPort, pin: u8) -> u32 { (port as u32) * 16 + pi
 #[cfg(feature = "iox-claims")]
 fn sender_pid(sender: &Sender) -> u8 { sender.pid().map(|pid| pid.get()).unwrap_or(0) }
 fn find_first_none<T>(arr: &[Option<T>]) -> Option<usize> { arr.iter().position(|item| item.is_none()) }
+/// Pins per IOX port; the IOX register helpers assert a pin below this.
+const IOX_PINS: u8 = 16;
+/// Interrupt slots of the IOX; each one is a `SFR_INTCR_CRINTn` register.
+const IOX_IRQ_SLOTS: usize = 8;
+
+/// Writes the interrupt control register of IOX interrupt slot `index`.
+fn write_int_cr(iox: &Iox, index: usize, value: u32) {
+    assert!(index < IOX_IRQ_SLOTS, "IOX interrupt slot out of range");
+    // safety: the index is bounded by the number of slots, and the offset comes from the
+    // generated header file.
+    unsafe {
+        iox.csr.base().add(utralib::utra::iox::SFR_INTCR_CRINT0.offset()).add(index).write_volatile(value);
+    }
+}
+
+/// The IFRAM bank, first page and page count of the `size` bytes at `phys_addr`, when they
+/// start on a page boundary and lie inside one bank; `None` otherwise.
+fn ifram_pages(phys_addr: usize, size: usize) -> Option<(usize, usize, usize)> {
+    let banks = [
+        (utralib::generated::HW_IFRAM0_MEM, utralib::generated::HW_IFRAM0_MEM_LEN),
+        (utralib::generated::HW_IFRAM1_MEM, utralib::generated::HW_IFRAM1_MEM_LEN),
+    ];
+    for (bank, (base, len)) in banks.into_iter().enumerate() {
+        if phys_addr < base || phys_addr >= base + len {
+            continue;
+        }
+        let offset = phys_addr - base;
+        let count = size.div_ceil(4096);
+        if offset % 4096 != 0 || count == 0 || offset / 4096 + count > len / 4096 {
+            return None;
+        }
+        return Some((bank, offset / 4096, count));
+    }
+    None
+}
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -233,14 +268,8 @@ fn main() {
         let irq_csr = CSR::new(irq_page.as_mut_ptr() as *mut u32);
         let mut irq = Box::pin(IrqHandler { irq_csr, cid: self_cid });
         // ensure that iox interrupts are gated off by default
-        for index in 0..8 {
-            unsafe {
-                iox.csr
-                    .base()
-                    .add(utralib::utra::iox::SFR_INTCR_CRINT0.offset())
-                    .add(index)
-                    .write_volatile(0);
-            }
+        for index in 0..IOX_IRQ_SLOTS {
+            write_int_cr(&iox, index, 0);
         }
         iox.csr.wo(utra::iox::SFR_INTFR, 0);
         xous::claim_interrupt(
@@ -256,7 +285,7 @@ fn main() {
         // index maps 1:1 to a hardware register offset. Thus as interrupts are de-allocated,
         // we don't want the indices to change - in this case, Vec is not the right object,
         // we want a static array defined like this.
-        let mut irq_table: [Option<IrqLocalRegistration>; 8] = [const { None }; 8];
+        let mut irq_table: [Option<IrqLocalRegistration>; IOX_IRQ_SLOTS] = [const { None }; IOX_IRQ_SLOTS];
 
         // defer these connections until required by the UpdatePerClk call. This prevents
         // race conditions on startup, as both i2c and peri rely on the loop below running
@@ -292,6 +321,10 @@ fn main() {
 
                         let mut allocated_address = None;
                         for (bank, table) in ifram_allocs.iter_mut().enumerate() {
+                            // a zero-sized request would trip the assertion in `try_alloc`
+                            if requested_size == 0 {
+                                break;
+                            }
                             if bank == requested_bank || requested_bank > 1 {
                                 match try_alloc(table, requested_size, sender) {
                                     Some(offset) => {
@@ -334,29 +367,16 @@ fn main() {
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
                         let mapped_size = scalar.arg1;
                         let phys_addr = scalar.arg2;
-
-                        let bank: usize;
-                        let offset = if utralib::generated::HW_IFRAM0_MEM <= phys_addr
-                            && phys_addr
-                                < utralib::generated::HW_IFRAM0_MEM + utralib::generated::HW_IFRAM0_MEM_LEN
-                        {
-                            bank = 0;
-                            phys_addr - utralib::generated::HW_IFRAM0_MEM
-                        } else if utralib::generated::HW_IFRAM1_MEM <= phys_addr
-                            && phys_addr
-                                < utralib::generated::HW_IFRAM1_MEM + utralib::generated::HW_IFRAM1_MEM_LEN
-                        {
-                            bank = 1;
-                            phys_addr - utralib::generated::HW_IFRAM1_MEM
-                        } else {
-                            log::error!("Mapped IFRAM address 0x{:x} is invalid", phys_addr);
-                            panic!("Mapped IFRAM address is invalid");
+                        let Some((bank, first, count)) = ifram_pages(phys_addr, mapped_size) else {
+                            log::error!(
+                                "UnmapIfram of 0x{:x} bytes at 0x{:x}: not a page range inside an IFRAM bank",
+                                mapped_size,
+                                phys_addr
+                            );
+                            continue;
                         };
-                        let mut mapped_pages = mapped_size / 4096;
-                        if mapped_size % 4096 != 0 {
-                            mapped_pages += 1;
-                        }
-                        for record in ifram_allocs[bank][offset..offset + mapped_pages].iter_mut() {
+                        let pages = &mut ifram_allocs[bank][first..first + count];
+                        for record in pages.iter_mut() {
                             *record = None;
                         }
                     }
@@ -364,14 +384,21 @@ fn main() {
                 HalOpcode::ConfigureIox => {
                     #[cfg(feature = "iox-claims")]
                     let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
-                    let buf = unsafe {
-                        xous_ipc::Buffer::from_memory_message(
-                            msg_opt.as_mut().unwrap().body.memory_message().unwrap(),
-                        )
+                    let Some(mem) = msg_opt.as_ref().unwrap().body.memory_message() else {
+                        log::warn!("ConfigureIox: not a memory message");
+                        continue;
                     };
-                    let config = buf.to_original::<IoxConfigMessage, _>().unwrap();
+                    let buf = unsafe { xous_ipc::Buffer::from_memory_message(mem) };
+                    let Ok(config) = buf.to_original::<IoxConfigMessage, _>() else {
+                        log::warn!("ConfigureIox: malformed configuration");
+                        continue;
+                    };
                     // The message is an immutable lend, so a refusal cannot be reported back;
                     // the configuration is dropped and logged.
+                    if config.pin >= IOX_PINS {
+                        log::warn!("ConfigureIox: no pin {} on {:?}", config.pin, config.port);
+                        continue;
+                    }
                     #[cfg(feature = "iox-claims")]
                     if !claims.allows(config.port, config.pin, pid) {
                         log::warn!(
@@ -402,18 +429,27 @@ fn main() {
                     }
                 }
                 HalOpcode::ConfigureIoxIrq => {
-                    let mut buf = unsafe {
-                        xous_ipc::Buffer::from_memory_message(
-                            msg_opt.as_mut().unwrap().body.memory_message_mut().unwrap(),
-                        )
+                    let Some(mem) = msg_opt.as_mut().unwrap().body.memory_message_mut() else {
+                        log::warn!("ConfigureIoxIrq: not a memory message");
+                        continue;
                     };
-                    let mut registration = buf.to_original::<IoxIrqRegistration, _>().unwrap();
+                    let mut buf = unsafe { xous_ipc::Buffer::from_memory_message_mut(mem) };
+                    let Ok(mut registration) = buf.to_original::<IoxIrqRegistration, _>() else {
+                        log::warn!("ConfigureIoxIrq: malformed registration");
+                        continue;
+                    };
                     log::info!("Got registration request: {:?}", registration);
-                    if let Some(index) = find_first_none(&irq_table) {
+                    // `index` stays `None` on every refusal, which is what the caller reads back
+                    registration.index = None;
+                    let free_slot = find_first_none(&irq_table);
+                    if registration.pin >= IOX_PINS {
+                        log::warn!("IRQ refused: no pin {} on {:?}", registration.pin, registration.port);
+                    } else if free_slot.is_none() {
+                        log::warn!("IRQ refused: all {} Iox interrupt slots are in use", IOX_IRQ_SLOTS);
+                    } else if let (Some(index), Ok(local_conn)) =
+                        (free_slot, xns.request_connection(&registration.server))
+                    {
                         // create the reverse-lookup registration
-                        let local_conn = xns
-                            .request_connection(&registration.server)
-                            .expect("couldn't connect to IRQ registree");
                         let local_reg = IrqLocalRegistration {
                             cid: local_conn,
                             opcode: registration.opcode,
@@ -434,39 +470,28 @@ fn main() {
                         }
                         int_cr.set_enable(true);
                         int_cr.set_wakeup(true);
-                        // safety: the index and offset are mapped to the intended range because the index is
-                        // bounded by the size of irq_table, and the offset comes from the generated header
-                        // file.
-                        log::debug!(
-                            "writing {:x} to {:x} at index {}",
-                            int_cr.0,
-                            unsafe {
-                                iox.csr.base().add(utralib::utra::iox::SFR_INTCR_CRINT0.offset()).add(index)
-                                    as usize
-                            },
-                            index
-                        );
-                        unsafe {
-                            iox.csr
-                                .base()
-                                .add(utralib::utra::iox::SFR_INTCR_CRINT0.offset())
-                                .add(index)
-                                .write_volatile(int_cr.0);
-                        }
+                        log::debug!("writing {:x} to interrupt slot {}", int_cr.0, index);
+                        write_int_cr(&iox, index, int_cr.0);
                         registration.index = Some(index);
-
-                        buf.replace(registration).unwrap();
                     } else {
-                        panic!("Ran out of Iox interrupt slots: maximum 8 available");
+                        log::warn!("IRQ refused: no connection to server {:?}", registration.server);
+                    }
+                    // only the slot index goes back to the caller
+                    registration.server.clear();
+                    if buf.replace(registration).is_err() {
+                        log::warn!("ConfigureIoxIrq: could not answer the registration");
                     }
                 }
                 HalOpcode::UpdateIoxIrq => {
-                    let buf = unsafe {
-                        xous_ipc::Buffer::from_memory_message(
-                            msg_opt.as_ref().unwrap().body.memory_message().unwrap(),
-                        )
+                    let Some(mem) = msg_opt.as_ref().unwrap().body.memory_message() else {
+                        log::warn!("UpdateIoxIrq: not a memory message");
+                        continue;
                     };
-                    let update = buf.to_original::<IoxIrqUpdate, _>().unwrap();
+                    let buf = unsafe { xous_ipc::Buffer::from_memory_message(mem) };
+                    let Ok(update) = buf.to_original::<IoxIrqUpdate, _>() else {
+                        log::warn!("UpdateIoxIrq: malformed update");
+                        continue;
+                    };
                     log::debug!("Got IRQ update request: {:?}", update);
                     if let Some(Some(reg)) = irq_table.get_mut(update.index) {
                         if reg.server == update.server {
@@ -555,7 +580,10 @@ fn main() {
                     #[cfg(feature = "iox-claims")]
                     let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
-                        let port: IoxPort = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
+                        let Some(port) = IoxPort::from_usize(scalar.arg1) else {
+                            log::warn!("SetGpioBank: no port {}", scalar.arg1);
+                            continue;
+                        };
                         let value = scalar.arg2 as u16;
                         // pins claimed by other processes are dropped from the write; the rest go through
                         #[cfg(feature = "iox-claims")]
@@ -571,7 +599,11 @@ fn main() {
                     #[cfg(feature = "iox-claims")]
                     let pid = sender_pid(&msg_opt.as_ref().unwrap().sender);
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
-                        let port: IoxPort = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
+                        let Some(port) = IoxPort::from_usize(scalar.arg1) else {
+                            log::warn!("GetGpioBank: no port {}", scalar.arg1);
+                            scalar.arg1 = 0;
+                            continue;
+                        };
                         // pins claimed by other processes read as 0
                         #[cfg(feature = "iox-claims")]
                         let value = iox.get_gpio_bank(port) & claims.read_mask(port, pid);
@@ -604,7 +636,11 @@ fn main() {
                 HalOpcode::ConfigureBio => {
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
                         if scalar.arg3 == 0 {
-                            let port: IoxPort = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
+                            let Some(port) = IoxPort::from_usize(scalar.arg1) else {
+                                log::warn!("ConfigureBio: no port {}", scalar.arg1);
+                                scalar.arg2 = 0;
+                                continue;
+                            };
                             let pin = scalar.arg2 as u8;
                             match iox.set_bio_bit_from_port_and_pin(port, pin) {
                                 Some(bit) => {
@@ -613,17 +649,22 @@ fn main() {
                                 }
                                 _ => scalar.arg2 = 0,
                             }
-                        } else {
+                        } else if scalar.arg4 <= bio::IoConfigMode::ClearOnly as usize {
                             let io_mode: bio::IoConfigMode = scalar.arg4.into();
                             iox.set_ports_from_bio_bitmask(scalar.arg1 as u32, io_mode);
                             log::debug!("bio_bitmask: {:x}", iox.get_bio_mapping_bitmask());
                             // no return values need to be set
+                        } else {
+                            log::warn!("ConfigureBio: no I/O mode {}", scalar.arg4);
                         }
                     }
                 }
                 HalOpcode::ConfigureUdmaClock => {
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
-                        let periph: PeriphId = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
+                        let Some(periph) = PeriphId::from_usize(scalar.arg1) else {
+                            log::warn!("ConfigureUdmaClock: no peripheral {:#x}", scalar.arg1);
+                            continue;
+                        };
                         let enable = if scalar.arg2 != 0 { true } else { false };
                         if enable {
                             udma_global.clock_on(periph);
@@ -634,10 +675,18 @@ fn main() {
                 }
                 HalOpcode::ConfigureUdmaEvent => {
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
-                        let periph: PeriphId = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
+                        let periph: Option<PeriphId> = num_traits::FromPrimitive::from_usize(scalar.arg1);
+                        let to_channel: Option<EventChannel> =
+                            num_traits::FromPrimitive::from_usize(scalar.arg3);
+                        let (Some(periph), Some(to_channel)) = (periph, to_channel) else {
+                            log::warn!(
+                                "ConfigureUdmaEvent: no peripheral {:#x} or channel {}",
+                                scalar.arg1,
+                                scalar.arg3
+                            );
+                            continue;
+                        };
                         let event_offset = scalar.arg2 as u32;
-                        let to_channel: EventChannel =
-                            num_traits::FromPrimitive::from_usize(scalar.arg3).unwrap();
                         // note: no "air traffic control" is done to prevent mapping other
                         // events. Maybe this should be done? but for now, let's leave it
                         // as bare iron.
@@ -646,14 +695,21 @@ fn main() {
                 }
                 HalOpcode::UdmaIrqStatusBits => {
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
-                        let bank = num_traits::FromPrimitive::from_usize(scalar.arg1)
-                            .expect("Bad argument to UdmaIrqStatusBits");
-                        scalar.arg1 = udma_global.irq_status_bits(bank) as usize;
+                        match num_traits::FromPrimitive::from_usize(scalar.arg1) {
+                            Some(bank) => scalar.arg1 = udma_global.irq_status_bits(bank) as usize,
+                            None => {
+                                log::warn!("UdmaIrqStatusBits: no bank {}", scalar.arg1);
+                                scalar.arg1 = 0;
+                            }
+                        }
                     }
                 }
                 HalOpcode::PeriphReset => {
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message() {
-                        let periph: PeriphId = num_traits::FromPrimitive::from_usize(scalar.arg1).unwrap();
+                        let Some(periph) = PeriphId::from_usize(scalar.arg1) else {
+                            log::warn!("PeriphReset: no peripheral {:#x}", scalar.arg1);
+                            continue;
+                        };
                         udma_global.reset(periph);
                     }
                 }

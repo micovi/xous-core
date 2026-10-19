@@ -125,24 +125,32 @@ fn trng_service() -> ! {
                 }
             }),
             Some(api::Opcode::ErrorSubscribe) => {
-                let buffer = unsafe { Buffer::from_memory_message(msg.body.memory_message().unwrap()) };
-                let hookdata = buffer.to_original::<api::ScalarHook, _>().unwrap();
-                do_hook(hookdata, &mut error_cb_conns);
+                let Some(mem) = msg.body.memory_message() else {
+                    log::warn!("ErrorSubscribe: not a memory message");
+                    continue;
+                };
+                let buffer = unsafe { Buffer::from_memory_message(mem) };
+                match buffer.to_original::<api::ScalarHook, _>() {
+                    Ok(hookdata) => do_hook(hookdata, &mut error_cb_conns),
+                    Err(_) => log::warn!("ErrorSubscribe: malformed hook"),
+                }
             }
-            Some(api::Opcode::ErrorNotification) => {
-                unimplemented!()
-            }
-            Some(api::Opcode::HealthStats) => {
-                unimplemented!()
-            }
-            Some(api::Opcode::ErrorStats) => {
-                unimplemented!()
+            // the kernel TRNG keeps no health or error statistics to report
+            Some(api::Opcode::ErrorNotification)
+            | Some(api::Opcode::HealthStats)
+            | Some(api::Opcode::ErrorStats) => {
+                log::warn!("{:?} is not available on this board", op);
             }
             Some(api::Opcode::FillTrng) => {
-                let mm = msg.body.memory_message_mut().unwrap();
-                let buffer =
-                    api::IpcTrngBuf::from_memory_message_mut(mm).expect("couldn't unpack FillTrng buffer");
-                let len = buffer.len as usize;
+                let Some(mm) = msg.body.memory_message_mut() else {
+                    log::warn!("FillTrng: not a memory message");
+                    continue;
+                };
+                let Some(buffer) = api::IpcTrngBuf::from_memory_message_mut(mm) else {
+                    log::warn!("FillTrng: malformed buffer");
+                    continue;
+                };
+                let len = (buffer.len as usize).min(buffer.data.len());
                 trng.fill_buf(&mut buffer.data[..len]).expect("couldn't fill TRNG buffer");
             }
             None => {
@@ -155,7 +163,10 @@ fn trng_service() -> ! {
 fn do_hook(hookdata: api::ScalarHook, cb_conns: &mut Vec<ScalarCallback>) {
     let (s0, s1, s2, s3) = hookdata.sid;
     let sid = xous::SID::from_u32(s0, s1, s2, s3);
-    let server_to_cb_cid = xous::connect(sid).unwrap();
+    let Ok(server_to_cb_cid) = xous::connect(sid) else {
+        log::warn!("TRNG error hook refused: no server to connect to");
+        return;
+    };
     let cb_dat =
         ScalarCallback { server_to_cb_cid, cb_to_client_cid: hookdata.cid, cb_to_client_id: hookdata.id };
     cb_conns.push(cb_dat);

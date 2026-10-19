@@ -64,7 +64,10 @@ fn i2c_service() -> ! {
             {
                 if let Some(msg) = msg_opt.as_mut().unwrap().body.memory_message_mut() {
                     let mut buf = unsafe { xous_ipc::Buffer::from_memory_message_mut(msg) };
-                    let mut list = buf.to_original::<I2cTransactions, _>().expect("I2c message format error");
+                    let Ok(mut list) = buf.to_original::<I2cTransactions, _>() else {
+                        log::warn!("I2C: malformed transaction list");
+                        continue;
+                    };
                     for transaction in list.transactions.iter_mut() {
                         match transaction.i2c_type {
                             I2cTransactionType::Write => {
@@ -90,7 +93,9 @@ fn i2c_service() -> ! {
                             }
                         }
                     }
-                    buf.replace(list).expect("I2c message format error");
+                    if buf.replace(list).is_err() {
+                        log::warn!("I2C: could not answer the transaction list");
+                    }
                 }
             }
             I2cOpcode::UpdatePerclk => {

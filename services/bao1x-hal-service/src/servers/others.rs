@@ -39,6 +39,12 @@ fn peri_service() -> ! {
         match opcode {
             PeripheralOpcode::ReadAdcChannel => {
                 if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
+                    // the conversion below panics past the temperature sensor and the 4 channels
+                    if scalar.arg1 > 4 {
+                        log::warn!("ReadAdcChannel: no source {}", scalar.arg1);
+                        scalar.arg1 = 0;
+                        continue;
+                    }
                     let channel = AdcSource::from_usize(scalar.arg1);
                     // sets to at least 1, even if the arg is 0
                     // max averaging is limited by the size of the ADC buffer
@@ -49,6 +55,11 @@ fn peri_service() -> ! {
             }
             PeripheralOpcode::EnableChannel => {
                 if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
+                    // the conversion below panics past the 4 external channels
+                    if scalar.arg1 > 3 {
+                        log::warn!("EnableChannel: no channel {}", scalar.arg1);
+                        continue;
+                    }
                     let channel: AdcExtChannel = scalar.arg1.into();
                     let pin = match channel {
                         AdcExtChannel::Adc0 => 4,
