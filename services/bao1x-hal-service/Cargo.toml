@@ -58,6 +58,10 @@ oem-baosec-lite = ["bao1x-hal/oem-baosec-lite"]
 with-duart = ["bao1x-hal/debug-print-duart"]
 # Let a process claim I/O pins and UDMA peripherals; configuration, writes, edge interrupts,
 # resets and clock gating of claimed ones from other processes are refused, and the values
-# of claimed pins are hidden from them (see bao1x-api).
+# of claimed pins are hidden from them (see bao1x-api). Use with bio-locked: the BIO can
+# take any pin.
 iox-claims = ["bao1x-api/iox-claims"]
+# For an image that runs no BIO code: the HAL service maps the BIO's pages and keeps its
+# cores stopped, registers no BIO server, routes no pin to the BIO and refuses ConfigureBio.
+bio-locked = []
 default = ["app-uart", "utralib"]

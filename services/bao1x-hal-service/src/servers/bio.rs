@@ -1,13 +1,55 @@
+#[cfg(not(feature = "bio-locked"))]
 use bao1x_api::bio::*;
+#[cfg(not(feature = "bio-locked"))]
 use bao1x_api::bio_resources::*;
 use bao1x_hal::bio_hw;
 
+#[cfg(not(feature = "bio-locked"))]
 pub fn start_bio_service() {
     std::thread::spawn(move || {
         bio_service();
     });
 }
 
+/// The BIO's register pages, mapped into this process and never released, so that no other
+/// process can map them: the BDMA/control page with the code-load, run-control, I/O and DMA
+/// filter window registers, the four instruction memories, and the four FIFO/event aliases.
+#[cfg(feature = "bio-locked")]
+const BIO_FIFO_PAGES: [usize; 4] = [
+    utralib::HW_BIO_FIFO0_MEM,
+    utralib::HW_BIO_FIFO1_MEM,
+    utralib::HW_BIO_FIFO2_MEM,
+    utralib::HW_BIO_FIFO3_MEM,
+];
+
+/// Takes the BIO and keeps it stopped, without a server. An image that runs no BIO code
+/// leaves no way to load code into the cores, start them, route pins to them or point their
+/// DMA at memory: `BioSharedState::new` maps the control page and the instruction memories
+/// and leaves the four cores stopped, the FIFO pages are mapped here, and `_BIO server_` is
+/// never registered, so there is no IPC path to any of it.
+#[cfg(feature = "bio-locked")]
+pub fn start_bio_service() {
+    std::thread::spawn(move || {
+        let clk_mgr = bao1x_hal_service::ClockManager::new();
+        let _bio_ss = bio_hw::BioSharedState::new(clk_mgr.get_fclk());
+        for page in BIO_FIFO_PAGES {
+            if let Err(e) = xous::syscall::map_memory(
+                xous::MemoryAddress::new(page),
+                None,
+                4096,
+                xous::MemoryFlags::R | xous::MemoryFlags::W,
+            ) {
+                log::warn!("BIO FIFO page 0x{:x} not held: {:?}", page, e);
+            }
+        }
+        log::info!("BIO locked: cores stopped, pages held, no server");
+        loop {
+            std::thread::park();
+        }
+    });
+}
+
+#[cfg(not(feature = "bio-locked"))]
 fn bio_service() {
     let xns = xous_names::XousNames::new().unwrap();
     // claim the server name
@@ -322,6 +364,7 @@ fn bio_service() {
     }
 }
 
+#[cfg(not(feature = "bio-locked"))]
 /// Server-side resource tracking state
 pub struct ResourceTracker {
     /// For each core: None if available, Some(claimer_name) if claimed
@@ -338,6 +381,7 @@ pub struct ResourceTracker {
     active_grants: Vec<(u32, String)>,
 }
 
+#[cfg(not(feature = "bio-locked"))]
 impl ResourceTracker {
     pub fn new() -> Self {
         Self {
@@ -602,6 +646,7 @@ impl ResourceTracker {
     }
 }
 
+#[cfg(not(feature = "bio-locked"))]
 impl Clone for ResourceTracker {
     fn clone(&self) -> Self {
         Self {

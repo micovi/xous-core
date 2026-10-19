@@ -224,6 +224,9 @@ fn main() {
         )
         .expect("couldn't claim the IOX hardware page");
         let iox = Iox::new(iox_page.as_ptr() as *mut u32);
+        // No pin is routed to the BIO in this build (see `ConfigureBio` below).
+        #[cfg(feature = "bio-locked")]
+        iox.csr.wo(utra::iox::SFR_PIOSEL, 0);
 
         let udma_global = GlobalConfig::new();
 
@@ -714,6 +717,21 @@ fn main() {
                     }
                 }
                 HalOpcode::ConfigureBio => {
+                    // With bio-locked the image runs no BIO code and this process holds the BIO's
+                    // pages so that no other process can (servers/bio.rs), so no pin may be handed
+                    // to the BIO either. The single-pin form answers "no mapping"; the bitmask form
+                    // is dropped.
+                    #[cfg(feature = "bio-locked")]
+                    {
+                        log::warn!(
+                            "ConfigureBio refused for PID {}: the BIO is locked",
+                            sender_pid(&msg_opt.as_ref().unwrap().sender)
+                        );
+                        if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
+                            scalar.arg2 = 0;
+                        }
+                    }
+                    #[cfg(not(feature = "bio-locked"))]
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
                         if scalar.arg3 == 0 {
                             let Some(port) = IoxPort::from_usize(scalar.arg1) else {

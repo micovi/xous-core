@@ -194,7 +194,10 @@ fn susres_service() {
                         hal.set_preemption(false);
                         log::info!("all callbacks reporting in, doing suspend");
 
+                        // the BIO server does not exist when the BIO is locked
+                        #[cfg(not(feature = "bio-locked"))]
                         use bao1x_api::bio::BioApi;
+                        #[cfg(not(feature = "bio-locked"))]
                         let mut bio = bao1x_hal::bio::Bio::new();
 
                         // hard-coded to the value of the external crystal - this is a hardware
@@ -226,16 +229,20 @@ fn susres_service() {
                         //   - The update_bio_freq routine is being "too clever" and compensating for the fd
                         //     setting. But it seems like the routine just takes the putative fclk setting as
                         //     the argument to update_bio_freq(), I don't see any compensation happening...
+                        #[cfg(not(feature = "bio-locked"))]
                         bio.prep_freq_change(true);
+                        #[cfg(not(feature = "bio-locked"))]
                         bio.update_bio_freq(48_000_000);
                         clk_mgr.wfi();
 
                         // ~~~ time passes, but we're on carbonite so we don't notice ~~~
 
+                        #[cfg(not(feature = "bio-locked"))]
                         bio.prep_freq_change(false);
                         clk_mgr.set_fclk_fd(fclk_fd_backup); // restore the FD for fclk, as it is side-effected by WFI
                         // fast PLL setting
                         clk_mgr.restore_wfi();
+                        #[cfg(not(feature = "bio-locked"))]
                         bio.update_bio_freq(clk_mgr.fclk);
 
                         // when wfi() returns, it means we've resumed
