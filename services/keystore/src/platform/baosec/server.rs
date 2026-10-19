@@ -22,6 +22,9 @@ pub fn keystore(sid: SID) -> ! {
     let mut backup_mgr = bao1x_hal::buram::BackupManager::new();
     // does nothing if the keys are already initialized
     store.ensure_system_init(&mut rram);
+    // does nothing if the device-bound secret is already provisioned and locked down
+    #[cfg(feature = "device-secret")]
+    store.ensure_device_secret(&mut rram);
     // derive the master key
     store.derive_master_key();
 
@@ -48,7 +51,7 @@ pub fn keystore(sid: SID) -> ! {
         let opcode = num_traits::FromPrimitive::from_usize(msg.body.id()).unwrap_or(Opcode::InvalidCall);
         log::debug!("{:?}", opcode);
         // the PID the kernel stamped on the message; 0 when there is none
-        #[cfg(feature = "caller-gating")]
+        #[cfg(any(feature = "caller-gating", feature = "device-secret"))]
         let sender_pid: u8 = msg.sender.pid().map(|pid| pid.get()).unwrap_or(0);
         match opcode {
             Opcode::AesOracle => {
@@ -229,6 +232,25 @@ pub fn keystore(sid: SID) -> ! {
                         _ => app_key = AppKey::InternalError,
                     }
                     buffer.replace(app_key).unwrap();
+                }
+            }
+            #[cfg(feature = "device-secret")]
+            Opcode::DerivedSecret => {
+                if let Some(mem) = msg.body.memory_message_mut() {
+                    let mut buffer = unsafe { Buffer::from_memory_message_mut(mem) };
+                    let mut request = buffer.to_original::<DerivedSecret, _>().unwrap();
+                    if sender_pid == 0 {
+                        request.status = DerivedSecretStatus::InternalError;
+                    } else {
+                        match store.derived_secret(sender_pid as u32, request.domain.as_bytes()) {
+                            Ok(secret) => {
+                                request.secret = secret;
+                                request.status = DerivedSecretStatus::Ok;
+                            }
+                            Err(status) => request.status = status,
+                        }
+                    }
+                    buffer.replace(request).unwrap();
                 }
             }
             #[cfg(feature = "swap")]

@@ -415,6 +415,21 @@ impl Keystore {
         }
     }
 
+    /// Asks the keystore for `HKDF-SHA256(device-bound secret, this process's PID || domain)`.
+    /// See `keystore_api::Opcode::DerivedSecret` for what the secret does and does not bind.
+    #[cfg(feature = "device-secret")]
+    pub fn derived_secret(&self, domain: &str) -> Result<[u8; DEVICE_SECRET_LEN], DerivedSecretStatus> {
+        let request = DerivedSecret::request(domain);
+        let mut buf = Buffer::into_buf(request).or(Err(DerivedSecretStatus::InternalError))?;
+        buf.lend_mut(self.conn, Opcode::DerivedSecret.to_u32().unwrap())
+            .or(Err(DerivedSecretStatus::InternalError))?;
+        let response = buf.to_original::<DerivedSecret, _>().or(Err(DerivedSecretStatus::InternalError))?;
+        match response.status {
+            DerivedSecretStatus::Ok => Ok(response.secret),
+            other => Err(other),
+        }
+    }
+
     #[cfg(feature = "swap")]
     pub fn ensure_swap_encryption(
         &self,

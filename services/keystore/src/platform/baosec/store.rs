@@ -434,6 +434,76 @@ impl KeyStore {
 
     pub fn is_developer(&self) -> bool { self.owc.get(bao1x_api::DEVELOPER_MODE).unwrap() != 0 }
 
+    /// Provisions `DEVICE_BOUND_SECRET` once: fills it from the TRNG when it is empty, then
+    /// sets its ACL to the slot's specification (the keystore's own partition, read-write)
+    /// when the ACL differs. Each step is skipped when already done, so a power cut between
+    /// the two leaves nothing to undo and no one-way counter is spent on the state.
+    #[cfg(feature = "device-secret")]
+    pub fn ensure_device_secret(&mut self, rram: &mut Reram) {
+        use bao1x_api::offsets::dabao::DEVICE_BOUND_SECRET;
+        use bao1x_hal::acram::AccessSettings;
+        use zeroize::Zeroize;
+
+        let slot = &DEVICE_BOUND_SECRET;
+        // safety: an unchecked read is the only way to look at the slot before its ACL is
+        // known to be right; the content is used for the empty test only
+        if slot_is_empty(unsafe { self.slot_mgr.read_unchecked(slot) }) {
+            let xns = xous_names::XousNames::new().unwrap();
+            let mut trng = bao1x_hal_service::trng::Trng::new(&xns).unwrap();
+            let mut secret = [0u8; KEY_LEN];
+            trng.fill_bytes(&mut secret);
+            let written = self.slot_mgr.write(rram, slot, &secret);
+            secret.zeroize();
+            match written {
+                Ok(()) => log::info!("Device-bound secret provisioned."),
+                Err(e) => {
+                    log::error!("Couldn't provision the device-bound secret in {:?}: {:?}", slot, e);
+                    return;
+                }
+            }
+        }
+
+        let (partition, perms) = slot.get_access_spec();
+        let mut acl = match self.slot_mgr.get_acl(slot) {
+            Ok(acl) => acl,
+            Err(e) => {
+                log::error!("Couldn't read the ACL of {:?}: {:?}", slot, e);
+                return;
+            }
+        };
+        let AccessSettings::Data(ref mut access) = acl;
+        if access.get_partition_access() == partition && access.get_rw_permissions() == perms {
+            log::info!("{}DEVICESECRET.OK,{}", BOOKEND_START, BOOKEND_END);
+            return;
+        }
+        access.set_partition_access(&partition);
+        access.set_rw_permissions(perms);
+        match self.slot_mgr.set_acl(rram, slot, &acl) {
+            Ok(()) => log::info!("{}DEVICESECRET.LOCKED,{}", BOOKEND_START, BOOKEND_END),
+            Err(e) => log::error!("Couldn't set the ACL of {:?}: {:?}", slot, e),
+        }
+    }
+
+    /// `HKDF-SHA256(ikm = DEVICE_BOUND_SECRET, info = pid || domain)`, 32 bytes.
+    #[cfg(feature = "device-secret")]
+    pub fn derived_secret(&self, pid: u32, domain: &[u8]) -> Result<[u8; KEY_LEN], DerivedSecretStatus> {
+        use bao1x_api::offsets::dabao::DEVICE_BOUND_SECRET;
+        use zeroize::Zeroize;
+
+        let bytes = self.slot_mgr.read(&DEVICE_BOUND_SECRET).map_err(|e| {
+            log::error!("Couldn't read the device-bound secret: {:?}", e);
+            DerivedSecretStatus::InternalError
+        })?;
+        if slot_is_empty(bytes) {
+            return Err(DerivedSecretStatus::NotProvisioned);
+        }
+        let mut ikm = [0u8; KEY_LEN];
+        ikm.copy_from_slice(bytes);
+        let secret = derive_device_secret(&ikm, pid, domain);
+        ikm.zeroize();
+        Ok(secret)
+    }
+
     #[cfg(all(not(feature = "legacy-swap-key"), feature = "swap"))]
     pub(crate) fn get_swap_key(&self) -> [u8; 32] {
         self.slot_mgr.read(&SWAP_KEY).expect("couldn't access swap key").try_into().unwrap()
@@ -832,4 +902,10 @@ impl KeyStore {
 
         Ok(())
     }
+}
+
+/// A slot that was never written reads as all zeros, an erased one as all `ERASE_VALUE`.
+#[cfg(feature = "device-secret")]
+fn slot_is_empty(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&b| b == 0) || bytes.iter().all(|&b| b == bao1x_hal::ERASE_VALUE)
 }

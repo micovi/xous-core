@@ -151,5 +151,8 @@ hazardous-debug = []
 # application slots or the application one-way counters own them; every other process
 # is refused with a typed error.
 caller-gating = ["keystore-api/caller-gating"]
+# Keep a device-bound secret in DEVICE_BOUND_SECRET (filled from the TRNG on the first
+# run, ACL for the keystore's own partition) and serve per-caller HKDF derivations of it.
+device-secret = ["keystore-api/device-secret"]
 
 default = []
