@@ -32,6 +32,9 @@ gen2 = []
 owc-inc = []
 app-keys = []
 swap = []
+# The first process to use a gated application slot or counter owns it; every other
+# process is refused from then on.
+caller-gating = []
 
 std = ["derive-rkyv", "xous-names", "xous-ipc", "locales"]
 derive-rkyv = ["rkyv"]

@@ -29,6 +29,9 @@ pub enum OneWayErr {
     InternalError,
     // used to indicate things are OK in xous environments
     None,
+    /// The counter is gated and another process used it first. Only answered by keystores
+    /// built with caller gating.
+    CallerRefused,
 }
 
 /// A claim on a contiguous run of one-way counter slots.

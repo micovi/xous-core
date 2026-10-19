@@ -12,3 +12,7 @@ pub use gen2_api::*;
 pub mod common;
 pub use common::*;
 pub mod rkyv_enum;
+#[cfg(feature = "caller-gating")]
+pub mod callers;
+#[cfg(feature = "caller-gating")]
+pub use callers::*;

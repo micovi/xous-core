@@ -48,6 +48,9 @@ pub enum AppKey {
     WriteError,
     Success,
     InternalError,
+    /// The slot is gated and another process used it first (`caller-gating`).
+    #[cfg(feature = "caller-gating")]
+    CallerRefused,
 }
 
 impl Default for AppKey {
