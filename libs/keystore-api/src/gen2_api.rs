@@ -32,6 +32,19 @@ pub enum Opcode {
     #[cfg(feature = "app-keys")]
     AppKeyOp = 1024,
 
+    /// Derive a secret for the caller from the device-bound secret (memory mutable lend of a
+    /// `DerivedSecret`): `HKDF-SHA256(ikm = the slot, info = caller PID ‖ domain)`. The PID is
+    /// the one the kernel stamps on the message, so no process can obtain another's secret.
+    ///
+    /// What this binds against: a copy of the RRAM slots taken off the chip (the slot's ACL
+    /// admits only the keystore's own partition, `Fw0`), and the other processes of the image
+    /// (each gets a secret of its own). What it does NOT bind against: whoever reflashes the
+    /// chip with the public developer key and runs their own code as the keystore's PID; they
+    /// read the slot. A device that resists its holder needs a boot chain rooted in keys that
+    /// are not public.
+    #[cfg(feature = "device-secret")]
+    DerivedSecret = 1280,
+
     /// Call to trigger that swap is encrypted
     #[cfg(feature = "swap")]
     EnsureSwapEncryption = 1536,

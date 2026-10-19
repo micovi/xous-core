@@ -3894,12 +3894,14 @@ name = "keystore-api"
 version = "0.1.0"
 dependencies = [
  "cipher 0.4.4",
+ "hkdf",
  "keyboard",
  "locales",
  "num-derive 0.4.2",
  "num-traits",
  "precursor-hal",
  "rkyv 0.8.8",
+ "sha2 0.10.8",
  "xous 0.9.71 (registry+https://github.com/rust-lang/crates.io-index)",
  "xous-api-names",
  "xous-ipc 0.10.11 (registry+https://github.com/rust-lang/crates.io-index)",

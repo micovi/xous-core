@@ -16,3 +16,7 @@ pub mod rkyv_enum;
 pub mod callers;
 #[cfg(feature = "caller-gating")]
 pub use callers::*;
+#[cfg(feature = "device-secret")]
+pub mod device_secret;
+#[cfg(feature = "device-secret")]
+pub use device_secret::*;

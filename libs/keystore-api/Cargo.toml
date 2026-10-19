@@ -19,6 +19,8 @@ locales = { path = "../../locales", optional = true }
 # needed for backups to save/restore keymaps
 keyboard = { path = "../../services/keyboard", optional = true }
 precursor-hal = { path = "../../libs/precursor-hal" }
+hkdf = { version = "0.12.4", optional = true }
+sha2 = { version = "0.10.8", optional = true }
 
 [features]
 gen1 = ["keyboard"]
@@ -35,6 +37,8 @@ swap = []
 # The first process to use a gated application slot or counter owns it; every other
 # process is refused from then on.
 caller-gating = []
+# A device-bound secret kept by the keystore, derived per caller and domain with HKDF.
+device-secret = ["hkdf", "sha2"]
 
 std = ["derive-rkyv", "xous-names", "xous-ipc", "locales"]
 derive-rkyv = ["rkyv"]
