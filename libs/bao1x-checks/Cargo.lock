@@ -160,9 +160,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "xous"
-version = "0.9.70"
+version = "0.9.71"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8076e0a642623e94fcfa795dc1e5409715a6f9f842b019c5afffc87efe8d76f8"
+checksum = "673f8f1b380ca7f3efe808b87cb48c4dac72aed03d235337d5593ddc0d00ff93"
 dependencies = [
  "lazy_static",
 ]
