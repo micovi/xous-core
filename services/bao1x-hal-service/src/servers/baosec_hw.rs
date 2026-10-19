@@ -1,7 +1,6 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 use std::cell::RefCell;
 
-use bao1x_hal_service::trng::api;
 use bio_lib::av_trng::AvTrng;
 use rand_chacha::ChaCha8Rng;
 // the 0.5.1 API is necessary for compatibility with curve25519-dalek crates
@@ -114,14 +113,6 @@ impl HwTrng {
             let chunk: [u8; 4] = self.next_u32().to_ne_bytes();
             left.copy_from_slice(&chunk[..n]);
         }
-    }
-
-    pub fn get_tests(&self) -> api::HealthTests {
-        todo!();
-    }
-
-    pub fn get_errors(&self) -> api::TrngErrors {
-        todo!();
     }
 }
 
