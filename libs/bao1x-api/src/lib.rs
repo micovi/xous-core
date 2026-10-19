@@ -6,6 +6,10 @@ pub use udma::*;
 // aren't available in e.g. kernel or loader.
 pub mod iox;
 pub use iox::*;
+#[cfg(feature = "iox-claims")]
+pub mod iox_claims;
+#[cfg(feature = "iox-claims")]
+pub use iox_claims::*;
 pub mod i2c;
 pub use i2c::*;
 pub mod api;

@@ -35,6 +35,10 @@ key-testing = []
 # is *not* the primary design intent of this key, so this is probably more an inconvenience to
 # a determined hacker than an actual barrier.
 erase-swap-on-dev = []
+# A table of I/O pins owned by process, kept by the HAL service: a process claims the
+# pins it drives and reads, and the service refuses to reconfigure or write them for
+# any other process.
+iox-claims = []
 
 std = ["derive-rkyv", "xous-names", "xous-ipc"]
 derive-rkyv = ["rkyv"]

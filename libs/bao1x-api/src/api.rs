@@ -42,6 +42,12 @@ pub enum HalOpcode {
     UdmaIrqStatusBits = 16,
     // blocking scalar
     UpdatePerclk = 18,
+    /// Claim I/O pins for the calling process (blocking scalar: port, pin mask). The
+    /// service then refuses to reconfigure or write those pins for any other process and
+    /// hides their values from it. Answers 0 when claimed, 1 when another process owns one
+    /// of the pins, 2 when the request is malformed.
+    #[cfg(feature = "iox-claims")]
+    ClaimIox = 19,
 
     /// Peripheral reset
     PeriphReset = 10,
