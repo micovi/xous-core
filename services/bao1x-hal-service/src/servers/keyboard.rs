@@ -19,6 +19,11 @@ use xous_ipc::Buffer;
 
 #[cfg(feature = "board-baosec")]
 const KEYUP_DELAY_MS: u64 = 80;
+/// Listeners kept. Any process may register one, and each costs a connection of this process
+/// (the kernel gives a process 32), so the list is bounded.
+const MAX_LISTENERS: usize = 8;
+/// Callers kept waiting in `BlockingKeyListener`; each one beyond is answered at once with no key.
+const MAX_BLOCKING_LISTENERS: usize = 16;
 
 #[cfg(feature = "board-baosec")]
 pub fn handler(_irq_no: usize, arg: *mut usize) {
@@ -370,7 +375,15 @@ fn keyboard_service() {
         log::debug!("{:?}", op);
         match op {
             Some(KeyboardOpcode::BlockingKeyListener) => {
-                blocking_listener.push(msg.sender);
+                // the caller is answered at the next key, which only a blocking scalar can wait for
+                if !(msg.body.is_blocking() && msg.body.scalar_message().is_some()) {
+                    log::warn!("BlockingKeyListener from PID {:?}: not a blocking scalar", msg.sender.pid());
+                } else if blocking_listener.len() >= MAX_BLOCKING_LISTENERS {
+                    log::warn!("BlockingKeyListener: already {} waiting", blocking_listener.len());
+                    answer_keys(msg.sender, 0, 0);
+                } else {
+                    blocking_listener.push(msg.sender);
+                }
             }
             Some(KeyboardOpcode::RegisterListener) => {
                 let Some(mem) = msg.body.memory_message() else {
@@ -382,7 +395,12 @@ fn keyboard_service() {
                     log::warn!("RegisterListener: malformed registration");
                     continue;
                 };
-                match xns.request_connection_blocking(kr.server_name.as_str()) {
+                if listeners.len() >= MAX_LISTENERS {
+                    log::warn!("RegisterListener refused: already {} listeners", listeners.len());
+                    continue;
+                }
+                // not `request_connection_blocking`, which waits for as long as the name is unknown
+                match xns.request_connection(kr.server_name.as_str()) {
                     Ok(cid) => {
                         log::info!("keyboard listener {} -> {}", kr.server_name, cid);
                         listeners.push((cid, <u32 as From<u32>>::from(kr.listener_op_id.into()) as usize));
@@ -400,7 +418,7 @@ fn keyboard_service() {
                         continue;
                     };
                     if observer_conn.is_none() {
-                        match xns.request_connection_blocking(kr.server_name.as_str()) {
+                        match xns.request_connection(kr.server_name.as_str()) {
                             Ok(cid) => {
                                 observer_conn = Some(cid);
                                 observer_op =
@@ -428,7 +446,9 @@ fn keyboard_service() {
             }
             Some(KeyboardOpcode::GetKeyMap) => msg_blocking_scalar_unpack!(msg, _, _, _, _, {
                 log::warn!("Defaulting to DVORAK map");
-                xous::return_scalar(msg.sender, KeyMap::Dvorak.into()).expect("can't retrieve keymap");
+                if let Err(e) = xous::return_scalar(msg.sender, KeyMap::Dvorak.into()) {
+                    log::warn!("GetKeyMap: could not answer PID {:?}: {:?}", msg.sender.pid(), e);
+                }
             }),
             #[cfg(feature = "board-baosec")]
             Some(KeyboardOpcode::SetRepeat) => msg_scalar_unpack!(msg, rate, delay, _, _, {
@@ -533,7 +553,7 @@ fn keyboard_service() {
                     // we must unblock anyways once the key is hit; even if the key is invalid,
                     // send the invalid key. The receiving library function will clean this up into a
                     // nil-response vector.
-                    xous::return_scalar2(listener, key as u32 as usize, 0).unwrap();
+                    answer_keys(listener, key as u32 as usize, 0);
                 }
             }),
             #[cfg(not(feature = "board-baosec"))]
@@ -600,12 +620,11 @@ fn keyboard_service() {
                     // handle the blocking listeners
                     if kc.len() > 0 {
                         for listener in blocking_listener.drain(..) {
-                            xous::return_scalar2(
+                            answer_keys(
                                 listener,
                                 if kc.len() >= 1 { kc[0] as u32 as usize } else { 0 },
                                 if kc.len() >= 2 { kc[1] as u32 as usize } else { 0 },
-                            )
-                            .unwrap();
+                            );
                             if kc.len() > 2 {
                                 log::warn!(
                                     "Extra keys in multi-hit event went unreported: only 2 of {} total keys reported out of {:?}",
@@ -650,6 +669,14 @@ fn keyboard_service() {
                 log::error!("couldn't convert KeyboardOpcode");
             }
         }
+    }
+}
+
+/// Answers a `BlockingKeyListener` caller with up to two keys. The caller may have ended since it
+/// sent the message, so a failure is logged, not fatal.
+fn answer_keys(listener: MessageSender, first: usize, second: usize) {
+    if let Err(e) = xous::return_scalar2(listener, first, second) {
+        log::warn!("BlockingKeyListener: could not answer PID {:?}: {:?}", listener.pid(), e);
     }
 }
 
