@@ -1,4 +1,6 @@
 mod api;
+#[cfg(feature = "mmio-hold")]
+mod mmio_hold;
 mod servers;
 
 use std::pin::Pin;
@@ -174,6 +176,11 @@ fn main() {
     log_server::init_wait().unwrap();
     log::set_max_level(log::LevelFilter::Info);
     log::info!("my PID is {}", xous::process::id());
+
+    // Before the name is registered: whatever waits for this service runs after the pages
+    // are held.
+    #[cfg(feature = "mmio-hold")]
+    let _held = mmio_hold::hold();
 
     let xns = xous_names::XousNames::new().unwrap();
     let sid = xns.register_name(bao1x_api::SERVER_NAME_BAO1X_HAL, None).expect("can't register server");

@@ -64,4 +64,9 @@ iox-claims = ["bao1x-api/iox-claims"]
 # For an image that runs no BIO code: the HAL service maps the BIO's pages and keeps its
 # cores stopped, registers no BIO server, routes no pin to the BIO and refuses ConfigureBio.
 bio-locked = []
+# For the Dabao image: the HAL service maps at its start, and keeps, the register pages of the
+# DMA masters nothing in the image uses (the PL230, the MDMA, the SCE DMA, the SD device
+# controller and the UDMA peripherals other than UART2, SPIM2, I2C0 and the ADC), so that no
+# other process can point them at memory (see src/mmio_hold.rs). Use with bio-locked.
+mmio-hold = []
 default = ["app-uart", "utralib"]
