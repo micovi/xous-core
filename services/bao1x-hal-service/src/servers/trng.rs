@@ -59,6 +59,9 @@ fn trng_service() -> ! {
                     log::warn!("ErrorSubscribe: not a memory message");
                     continue;
                 };
+                if !crate::servers::lent_length_fits(mem, "ErrorSubscribe") {
+                    continue;
+                }
                 let buffer = unsafe { Buffer::from_memory_message(mem) };
                 match buffer.to_original::<api::ScalarHook, _>() {
                     Ok(hookdata) => do_hook(hookdata, &mut error_cb_conns),
@@ -128,6 +131,9 @@ fn trng_service() -> ! {
                     log::warn!("ErrorSubscribe: not a memory message");
                     continue;
                 };
+                if !crate::servers::lent_length_fits(mem, "ErrorSubscribe") {
+                    continue;
+                }
                 let buffer = unsafe { Buffer::from_memory_message(mem) };
                 match buffer.to_original::<api::ScalarHook, _>() {
                     Ok(hookdata) => do_hook(hookdata, &mut error_cb_conns),

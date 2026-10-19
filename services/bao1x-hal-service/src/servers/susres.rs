@@ -138,6 +138,9 @@ fn susres_service() {
                         log::warn!("SuspendEventSubscribe: not a memory message");
                         continue;
                     };
+                    if !crate::servers::lent_length_fits(mem, "SuspendEventSubscribe") {
+                        continue;
+                    }
                     let buffer = unsafe { Buffer::from_memory_message(mem) };
                     match buffer.to_original::<ScalarHook, _>() {
                         Ok(hookdata) => do_hook(hookdata, &mut suspend_subscribers),

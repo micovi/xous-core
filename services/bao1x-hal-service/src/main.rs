@@ -433,6 +433,9 @@ fn main() {
                         log::warn!("ConfigureIox: not a memory message");
                         continue;
                     };
+                    if !servers::lent_length_fits(mem, "ConfigureIox") {
+                        continue;
+                    }
                     let buf = unsafe { xous_ipc::Buffer::from_memory_message(mem) };
                     let Ok(config) = buf.to_original::<IoxConfigMessage, _>() else {
                         log::warn!("ConfigureIox: malformed configuration");
@@ -479,6 +482,9 @@ fn main() {
                         log::warn!("ConfigureIoxIrq: not a memory message");
                         continue;
                     };
+                    if !servers::lent_length_fits(mem, "ConfigureIoxIrq") {
+                        continue;
+                    }
                     let mut buf = unsafe { xous_ipc::Buffer::from_memory_message_mut(mem) };
                     let Ok(mut registration) = buf.to_original::<IoxIrqRegistration, _>() else {
                         log::warn!("ConfigureIoxIrq: malformed registration");
@@ -547,6 +553,9 @@ fn main() {
                         log::warn!("UpdateIoxIrq: not a memory message");
                         continue;
                     };
+                    if !servers::lent_length_fits(mem, "UpdateIoxIrq") {
+                        continue;
+                    }
                     let buf = unsafe { xous_ipc::Buffer::from_memory_message(mem) };
                     let Ok(update) = buf.to_original::<IoxIrqUpdate, _>() else {
                         log::warn!("UpdateIoxIrq: malformed update");

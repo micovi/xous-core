@@ -65,6 +65,9 @@ fn i2c_service() -> ! {
             // there are no opcode types - this handles exactly one type of message, all others are ignored
             {
                 if let Some(msg) = msg_opt.as_mut().unwrap().body.memory_message_mut() {
+                    if !crate::servers::lent_length_fits(msg, "I2C") {
+                        continue;
+                    }
                     let mut buf = unsafe { xous_ipc::Buffer::from_memory_message_mut(msg) };
                     let Ok(mut list) = buf.to_original::<I2cTransactions, _>() else {
                         log::warn!("I2C: malformed transaction list");

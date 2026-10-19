@@ -392,6 +392,9 @@ fn keyboard_service() {
                     log::warn!("RegisterListener: not a memory message");
                     continue;
                 };
+                if !crate::servers::lent_length_fits(mem, "RegisterListener") {
+                    continue;
+                }
                 let buffer = unsafe { Buffer::from_memory_message(mem) };
                 let Ok(kr) = buffer.as_flat::<KeyboardRegistration, _>() else {
                     log::warn!("RegisterListener: malformed registration");
@@ -414,6 +417,9 @@ fn keyboard_service() {
             }
             Some(KeyboardOpcode::RegisterKeyObserver) => {
                 if let Some(mem) = msg.body.memory_message() {
+                    if !crate::servers::lent_length_fits(mem, "RegisterKeyObserver") {
+                        continue;
+                    }
                     let buffer = unsafe { Buffer::from_memory_message(mem) };
                     let Ok(kr) = buffer.as_flat::<KeyboardRegistration, _>() else {
                         log::warn!("RegisterKeyObserver: malformed registration");
