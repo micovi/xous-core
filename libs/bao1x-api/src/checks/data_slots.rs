@@ -176,6 +176,8 @@ pub const DABAO_DATA_CLAIMS: &[DataClaim] = &[
     primary("RMA_KEY", &crate::offsets::dabao::RMA_KEY),
     primary("THE_FLAG_1", &crate::offsets::dabao::THE_FLAG_1),
     primary("NUISANCE_KEYS_1", &crate::offsets::dabao::NUISANCE_KEYS_1),
+    // the last slot of the common page's free range [274..=383]; not a key slot on purpose
+    primary("DEVICE_BOUND_SECRET", &crate::offsets::dabao::DEVICE_BOUND_SECRET),
 ];
 
 /// A named (common, target) pairing, so the host tool can iterate targets by name.

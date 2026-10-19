@@ -1,4 +1,4 @@
-use crate::offsets::SlotIndex;
+use crate::offsets::{PartitionAccess, RwPerms, SlotIndex};
 
 // no external SPI
 pub const SPI_FLASH_LEN: usize = 0;
@@ -56,6 +56,20 @@ pub use crate::baosec::{
 
 pub const KEY_SLOTS: [SlotIndex; 6] =
     [THE_FLAG_1, ROOT_SEED, RMA_KEY, NUISANCE_KEYS_0, NUISANCE_KEYS_1, CHAFF_KEYS];
+
+/// A device-bound secret the keystore fills from the TRNG on its first run and serves only
+/// as per-caller HKDF derivations (`keystore-api`'s `DerivedSecret`, feature `device-secret`).
+///
+/// Why this slot: it is the last of the `[274..=383]` range the common page leaves for
+/// future data slots, as far as possible from a provisioning block that would grow up from
+/// 274; it is outside `APPLICATION` (384 and up), and it is deliberately NOT in `KEY_SLOTS`:
+/// boot0's `erase_secrets` (`bao1x-hal/src/sigcheck.rs`) iterates `KEY_SLOTS` only, so the
+/// per-boot erase of developer mode leaves this slot, and its ACL, as they are. The ACL
+/// admits the keystore's own partition (`Fw0`) alone; boot1's console and a raw read of the
+/// slot page from any other user are refused by the hardware.
+///
+/// <slot-map targets="dabao" registered="primary" in-key-slots="no" in-data-slots="no"/>
+pub const DEVICE_BOUND_SECRET: SlotIndex = SlotIndex::Data(383, PartitionAccess::Fw0, RwPerms::ReadWrite);
 
 // offsets into the application slot range for storing BIO config
 pub const APP_BIO_CLK_INDEX: usize = 0;
