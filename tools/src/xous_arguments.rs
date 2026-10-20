@@ -76,11 +76,21 @@ impl XousArguments {
         XousArguments { ram_start, ram_length, ram_name, arguments: vec![], detached_offset: None }
     }
 
-    pub fn set_detached_offset(&mut self, offset: XousSize) { self.detached_offset = Some(offset); }
+    /// `offset` is where byte 0 of this argument block lands, counted from the start of the
+    /// kernel's argument block. It must be page-aligned, so that the page offsets `finalize()`
+    /// computes are the ones `write()` pads to.
+    pub fn set_detached_offset(&mut self, offset: XousSize) {
+        assert!(
+            offset as usize % crate::tags::PAGE_SIZE == 0,
+            "detached offset {:x} is not page-aligned",
+            offset
+        );
+        self.detached_offset = Some(offset);
+    }
 
     pub fn finalize(&mut self) {
-        let mut running_offset =
-            crate::tags::align_size_up(self.len() as usize, 0) + self.detached_offset.unwrap_or(0) as usize;
+        // The payloads start right after the tags, exactly where `write()` starts padding them.
+        let mut running_offset = self.len() as usize + self.detached_offset.unwrap_or(0) as usize;
         // println!("offset: {:x}, alignment_offset: {:x}", running_offset, 0);
         for arg in &mut self.arguments {
             running_offset = crate::tags::align_size_up(running_offset, arg.alignment_offset());
@@ -220,4 +230,106 @@ impl XousArguments {
     pub fn is_empty(&self) -> bool { false }
 
     pub fn header_len(&self) -> usize { 8 }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::TryInto;
+    use std::io::Cursor;
+
+    use super::XousArguments;
+    use crate::elf::{MiniElfFlags, MiniElfSection};
+    use crate::tags::inif::IniF;
+
+    /// The page offset of the first section of the ELFs the Dabao apps are built into.
+    const ALIGNMENT: usize = 0x118;
+    const DETACHED_OFFSET: u32 = 0x16_0000;
+
+    /// The first word of a program's payload; the rest is zeros.
+    fn marker(program: usize) -> [u8; 4] { [0xa5, 0x5a, program as u8, (program >> 8) as u8] }
+
+    fn inif(program: usize) -> IniF {
+        let mut data = marker(program).to_vec();
+        data.resize(0x2345, 0);
+        let section = MiniElfSection {
+            virt: 0x1_0000 + ALIGNMENT as u32,
+            size: data.len() as u32,
+            flags: MiniElfFlags::NONE,
+            name: ".rodata".to_string(),
+        };
+        IniF::new(0x1_0000 + ALIGNMENT as u32, vec![section], data, ALIGNMENT)
+    }
+
+    /// Writes `count` programs and returns, for each IniF tag, its load offset less
+    /// `detached_offset` (the position the tag claims in this block) and the first word found
+    /// there.
+    fn claimed_payloads(count: usize, detached_offset: Option<u32>) -> (usize, Vec<(usize, [u8; 4])>) {
+        let mut args = XousArguments::new(0, 0, 0);
+        if let Some(offset) = detached_offset {
+            args.set_detached_offset(offset);
+        }
+        for program in 0..count {
+            args.add(inif(program));
+        }
+        let header_len = args.len() as usize;
+        let mut out = Cursor::new(Vec::new());
+        args.write(&mut out).unwrap();
+        let image = out.into_inner();
+
+        let word = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap()) as usize;
+        let mut claimed = Vec::new();
+        let mut at = 0;
+        while at < header_len {
+            let words = u16::from_le_bytes(image[at + 6..at + 8].try_into().unwrap()) as usize;
+            if image[at..at + 4] == *b"IniF" {
+                let position = word(at + 8) - detached_offset.unwrap_or(0) as usize;
+                claimed.push((position, image[position..position + 4].try_into().unwrap()));
+            }
+            at += 8 + words * 4;
+        }
+        (header_len, claimed)
+    }
+
+    fn assert_payloads_where_claimed(count: usize, detached_offset: Option<u32>) {
+        let (header_len, claimed) = claimed_payloads(count, detached_offset);
+        assert_eq!(claimed.len(), count);
+        for (program, (position, first_word)) in claimed.into_iter().enumerate() {
+            assert_eq!(position % crate::tags::PAGE_SIZE, ALIGNMENT, "program {program}");
+            assert_eq!(
+                first_word,
+                marker(program),
+                "program {program} of {count}: tags of {header_len} bytes claim it at {position:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn tags_shorter_than_the_alignment_offset() {
+        assert!(claimed_payloads(2, None).0 < ALIGNMENT);
+        assert_payloads_where_claimed(1, Some(DETACHED_OFFSET));
+        assert_payloads_where_claimed(2, Some(DETACHED_OFFSET));
+        assert_payloads_where_claimed(2, None);
+    }
+
+    /// Twelve one-section programs make 316 bytes of tags, as three Dabao apps of seven
+    /// sections each do.
+    #[test]
+    fn tags_longer_than_the_alignment_offset() {
+        assert_eq!(claimed_payloads(12, None).0, 316);
+        assert_payloads_where_claimed(12, Some(DETACHED_OFFSET));
+        assert_payloads_where_claimed(12, None);
+    }
+
+    #[test]
+    fn tags_longer_than_a_page() {
+        assert!(claimed_payloads(200, None).0 > crate::tags::PAGE_SIZE + ALIGNMENT);
+        assert_payloads_where_claimed(200, Some(DETACHED_OFFSET));
+        assert_payloads_where_claimed(200, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "not page-aligned")]
+    fn an_unaligned_detached_offset_is_refused() {
+        XousArguments::new(0, 0, 0).set_detached_offset(DETACHED_OFFSET - 0x100);
+    }
 }
