@@ -16,3 +16,9 @@ rkyv = { version = "0.8.8", default-features = false, features = [
     "std",
     "alloc",
 ] }
+
+[features]
+# Validate a received archive (lengths, relative pointers, enum tags) before reading it, so a
+# malformed buffer lent by another process is refused instead of read out of bounds. Every type
+# that crosses a `Buffer` then needs `CheckBytes`, which rkyv's `Archive` derive adds.
+checked-access = ["rkyv/bytecheck"]

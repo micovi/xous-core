@@ -8,6 +8,8 @@ use rkyv::{
     ser::{Positional, allocator::SubAllocator, writer::Buffer as RkyvBuffer},
     with::{ArchiveWith, Identity, SerializeWith},
 };
+#[cfg(feature = "checked-access")]
+use rkyv::{api::high::HighValidator, bytecheck::CheckBytes};
 use xous::{
     CID, Error, MemoryAddress, MemoryFlags, MemoryMessage, MemoryRange, MemorySize, Message, Result,
     map_memory, send_message, try_send_message, unmap_memory,
@@ -312,6 +314,7 @@ impl<'buf> Buffer<'buf> {
 
     /// Zero-copy representation of the data on the receiving side, wrapped in an "Archived" trait and left in
     /// the heap. Cheap so uses "as_" prefix.
+    #[cfg(not(feature = "checked-access"))]
     #[allow(dead_code)]
     pub fn as_flat<T, U>(&self) -> core::result::Result<&U, ()>
     where
@@ -324,6 +327,7 @@ impl<'buf> Buffer<'buf> {
 
     /// A representation identical to the original, but requires copying to the stack. More expensive so uses
     /// "to_" prefix.
+    #[cfg(not(feature = "checked-access"))]
     #[allow(dead_code)]
     pub fn to_original<T, U>(&self) -> core::result::Result<T, Error>
     where
@@ -333,6 +337,49 @@ impl<'buf> Buffer<'buf> {
     {
         let r = unsafe { rkyv::access_unchecked::<U>(&self.slice[..self.used]) };
         rkyv::deserialize::<T, rkyv::rancor::Error>(r).map_err(|_| Error::InternalError)
+    }
+
+    /// Zero-copy representation of the data on the receiving side, wrapped in an "Archived" trait and left in
+    /// the heap. Cheap so uses "as_" prefix.
+    ///
+    /// The archive is validated first: its length, relative pointers, lengths and enum tags must lie
+    /// within the buffer and be valid for `U`, so a malformed buffer from another process is refused
+    /// with `Err(())` instead of being read.
+    #[cfg(feature = "checked-access")]
+    #[allow(dead_code)]
+    pub fn as_flat<T, U>(&self) -> core::result::Result<&U, ()>
+    where
+        T: rkyv::Archive<Archived = U>,
+        U: Portable + for<'a> CheckBytes<HighValidator<'a, Failure>>,
+    {
+        self.checked_archive::<U>().ok_or(())
+    }
+
+    /// A representation identical to the original, but requires copying to the stack. More expensive so uses
+    /// "to_" prefix.
+    ///
+    /// The archive is validated first, as in `as_flat`; a malformed buffer is refused with
+    /// `Error::InternalError`.
+    #[cfg(feature = "checked-access")]
+    #[allow(dead_code)]
+    pub fn to_original<T, U>(&self) -> core::result::Result<T, Error>
+    where
+        T: rkyv::Archive<Archived = U>,
+        U: Portable + for<'a> CheckBytes<HighValidator<'a, Failure>>,
+        <T as Archive>::Archived: Deserialize<T, Strategy<rkyv::de::Pool, rkyv::rancor::Error>>,
+    {
+        let r = self.checked_archive::<U>().ok_or(Error::InternalError)?;
+        rkyv::deserialize::<T, rkyv::rancor::Error>(r).map_err(|_| Error::InternalError)
+    }
+
+    /// The archive in the first `used` bytes, if `used` fits the buffer and the archive validates.
+    #[cfg(feature = "checked-access")]
+    fn checked_archive<U>(&self) -> Option<&U>
+    where
+        U: Portable + for<'a> CheckBytes<HighValidator<'a, Failure>>,
+    {
+        let archive = self.slice.get(..self.used)?;
+        rkyv::access::<U, Failure>(archive).ok()
     }
 
     pub fn used(&self) -> usize { self.used }
@@ -361,5 +408,108 @@ impl<'a> Drop for Buffer<'a> {
         if self.should_drop {
             unmap_memory(self.pages).expect("Buffer: failed to drop memory");
         }
+    }
+}
+
+#[cfg(all(test, feature = "checked-access"))]
+mod checked_access_tests {
+    use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+    use super::*;
+
+    #[derive(Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    enum Kind {
+        Read,
+        Write,
+        Both,
+    }
+
+    #[derive(Debug, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct Request {
+        kind: Kind,
+        data: Vec<u8>,
+    }
+
+    /// One page of page-aligned memory standing in for a lent buffer.
+    struct Page(*mut u8);
+
+    impl Page {
+        fn layout() -> Layout { Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap() }
+
+        fn new() -> Self {
+            let ptr = unsafe { alloc_zeroed(Self::layout()) };
+            assert!(!ptr.is_null());
+            Page(ptr)
+        }
+
+        /// A buffer over this page holding a valid archive of `request`.
+        fn buffer_with(&self, request: Request) -> Buffer<'static> {
+            let range = unsafe { MemoryRange::new(self.0 as usize, PAGE_SIZE) }.unwrap();
+            let mut buffer = unsafe { Buffer::from_inner(range, 0) };
+            buffer.replace(request).unwrap();
+            buffer
+        }
+    }
+
+    impl Drop for Page {
+        fn drop(&mut self) { unsafe { dealloc(self.0, Self::layout()) } }
+    }
+
+    fn request() -> Request { Request { kind: Kind::Write, data: vec![1, 2, 3, 4] } }
+
+    /// Offset of the archived root, which rkyv places at the end of the archive.
+    fn root(buffer: &Buffer) -> usize { buffer.used() - core::mem::size_of::<ArchivedRequest>() }
+
+    fn write_u32(buffer: &mut Buffer, offset: usize, value: u32) {
+        buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn refused(buffer: &Buffer) -> bool {
+        buffer.as_flat::<Request, _>().is_err()
+            && buffer.to_original::<Request, _>() == Err(Error::InternalError)
+    }
+
+    #[test]
+    fn valid_archive_is_accepted() {
+        let page = Page::new();
+        let buffer = page.buffer_with(request());
+        let flat = buffer.as_flat::<Request, _>().unwrap();
+        assert_eq!(flat.data.as_slice(), &[1, 2, 3, 4]);
+        assert_eq!(buffer.to_original::<Request, _>().unwrap(), request());
+    }
+
+    #[test]
+    fn vec_length_past_the_end_is_refused() {
+        let page = Page::new();
+        let mut buffer = page.buffer_with(request());
+        let len = root(&buffer) + core::mem::offset_of!(ArchivedRequest, data) + 4;
+        write_u32(&mut buffer, len, 0x7fff_ffff);
+        assert!(refused(&buffer));
+    }
+
+    #[test]
+    fn relative_pointer_out_of_bounds_is_refused() {
+        let page = Page::new();
+        let mut buffer = page.buffer_with(request());
+        let ptr = root(&buffer) + core::mem::offset_of!(ArchivedRequest, data);
+        write_u32(&mut buffer, ptr, 0x0010_0000);
+        assert!(refused(&buffer));
+    }
+
+    #[test]
+    fn invalid_enum_tag_is_refused() {
+        let page = Page::new();
+        let mut buffer = page.buffer_with(request());
+        let tag = root(&buffer) + core::mem::offset_of!(ArchivedRequest, kind);
+        buffer[tag] = 0xff;
+        assert!(refused(&buffer));
+    }
+
+    #[test]
+    fn archive_length_past_the_buffer_is_refused() {
+        let page = Page::new();
+        let range = unsafe { MemoryRange::new(page.0 as usize, PAGE_SIZE) }.unwrap();
+        let buffer = unsafe { Buffer::from_inner(range, PAGE_SIZE + 1) };
+        assert!(refused(&buffer));
     }
 }
