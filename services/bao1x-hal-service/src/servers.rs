@@ -11,9 +11,10 @@ pub mod susres;
 pub mod trng;
 
 /// Whether the archive length a client gives with its lent buffer (the message offset) lies
-/// within the buffer; logged when not. `xous_ipc::Buffer` slices the buffer by it unchecked and
-/// panics past the end. The archive itself is not validated (rkyv is built without `bytecheck`),
-/// so its relative pointers, lengths and enum tags are still trusted.
+/// within the buffer; logged when not. Without the `checked-access` feature of `xous-ipc`,
+/// `xous_ipc::Buffer` slices the buffer by it unchecked and panics past the end, and trusts the
+/// archive's relative pointers, lengths and enum tags; with it (the `dabao-zsigner` image), the
+/// buffer refuses both, and this check only adds the log line.
 pub fn lent_length_fits(mem: &xous::MemoryMessage, what: &str) -> bool {
     let length = mem.offset.map_or(0, |offset| offset.get());
     if length > mem.buf.len() {
