@@ -19,7 +19,7 @@ impl UdmaGlobal {
     pub fn new() -> Self {
         let xns = xous_names::XousNames::new().unwrap();
         let conn =
-            xns.request_connection(SERVER_NAME_BAO1X_HAL).expect("Couldn't connect to bao1x HAL server");
+            xns.request_connection_blocking(SERVER_NAME_BAO1X_HAL).expect("Couldn't connect to bao1x HAL server");
         UdmaGlobal { conn }
     }
 
@@ -81,7 +81,7 @@ impl Hal {
     pub fn new() -> Self {
         let xns = xous_names::XousNames::new().unwrap();
         let conn =
-            xns.request_connection(SERVER_NAME_BAO1X_HAL).expect("Couldn't connect to bao1x HAL server");
+            xns.request_connection_blocking(SERVER_NAME_BAO1X_HAL).expect("Couldn't connect to bao1x HAL server");
         Hal { conn }
     }
 
