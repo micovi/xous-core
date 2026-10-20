@@ -27,12 +27,27 @@ pub fn check_project_consistency() -> Result<(), DynError> {
         "svd2utra^0.1.25",
     ];
     for pkg in check_pkgs {
+        let name = pkg.split('^').next().unwrap_or(pkg);
+        if patched_to_local_tree(name)? {
+            // the build takes this crate from the local tree, not from crates.io, so there is
+            // no downloaded source whose consistency matters
+            println!("Patched to the local tree, skipping consistency check: {}", name);
+            continue;
+        }
         verify(pkg.into(), true)?;
     }
     for pkg in warn_pkgs {
         verify(pkg.into(), false)?;
     }
     Ok(())
+}
+
+/// Whether the top-level Cargo.toml redirects crates.io's `name` to the local tree with an active
+/// `[patch.crates-io.<name>]` table.
+fn patched_to_local_tree(name: &str) -> Result<bool, DynError> {
+    let manifest = fs::read_to_string("Cargo.toml")?;
+    let table = format!("[patch.crates-io.{}]", name);
+    Ok(manifest.lines().any(|line| line.trim() == table))
 }
 
 pub fn verify(spec: CrateSpec, hard_failure: bool) -> Result<(), DynError> {

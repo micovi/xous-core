@@ -231,8 +231,9 @@ path = "./utralib"
 path = "./svd2utra"
 # [patch.crates-io.xous]
 # path = "./xous-rs"
-# [patch.crates-io.xous-ipc]
-# path = "./xous-ipc"
+# the in-tree xous-ipc carries the checked-access feature, enabled by the dabao-zsigner image
+[patch.crates-io.xous-ipc]
+path = "./xous-ipc"
 # [patch.crates-io.xous-api-names]
 # path = "./api/xous-api-names"
 # [patch.crates-io.xous-api-log]
