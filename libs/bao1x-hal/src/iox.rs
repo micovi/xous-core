@@ -47,7 +47,7 @@ impl Iox {
             let ptr = self.csr.base();
             ptr.add(iox::SFR_GPIOOUT_CRGO0.offset() + port as usize).write_volatile(
                 ptr.add(iox::SFR_GPIOOUT_CRGO0.offset() + port as usize).read_volatile() & !(mask as u32)
-                    | value as u32,
+                    | (value & mask) as u32,
             )
         }
     }
