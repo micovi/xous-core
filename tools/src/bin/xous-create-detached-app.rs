@@ -49,10 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // There is no kernel in this image, so the RAM section has no meaning. Set to 0.
     let mut args = XousArguments::new(0, 0, 0);
     if let Some(offset) = matches.value_of("detached-offset") {
-        // why the 0x1000 "fudge" on this constant? There's an extra 0x1000 of data inserted
-        // by the ELF creator and I seem to remember it also on the primary xous.img but I can't
-        // remember why.
-        let offset_u32 = parse_u32(offset).map_err(|_| "Cant parse detached-offset")? - 0x1000;
+        let offset_u32 = parse_u32(offset).map_err(|_| "Cant parse detached-offset")?;
         args.set_detached_offset(offset_u32);
     }
 

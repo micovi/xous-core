@@ -125,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // There is no kernel in this image, so the RAM section has no meaning. Set to 0.
         let mut args = XousArguments::new(0, 0, 0);
         args.set_detached_offset(
-            (bao1x_api::offsets::dabao::APP_RRAM_START - bao1x_api::offsets::KERNEL_START) as u32 - 0x1000,
+            (bao1x_api::offsets::dabao::APP_RRAM_START - bao1x_api::offsets::KERNEL_START) as u32,
         );
         args
     };
