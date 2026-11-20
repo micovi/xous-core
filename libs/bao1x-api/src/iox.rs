@@ -268,7 +268,9 @@ impl IoxHal {
 
     /// Claims the UDMA peripheral `periph` for the calling process, for its lifetime. The
     /// HAL service then refuses to reset it, gate its clock or remap its events for any
-    /// other process.
+    /// other process; for the I2C channel the service drives, it also refuses other processes'
+    /// transactions (each answered `I2cResult::InternalError`, the bus untouched) and clock
+    /// changes.
     #[cfg(feature = "iox-claims")]
     pub fn claim_periph(&self, periph: crate::PeriphId) -> Result<(), PeriphClaimError> {
         match xous::send_message(

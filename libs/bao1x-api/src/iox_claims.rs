@@ -5,8 +5,15 @@
 //! (edge interrupts) those pins for any other process and hides their input values from it.
 //! A process also claims the UDMA peripherals it drives (`HalOpcode::ClaimPeriph`); the
 //! service then refuses to reset them, gate their clock or remap their events for any other
-//! process. A claim lasts for the life of the process; nothing releases it. The table is
+//! process, and its I2C server runs transactions on a claimed channel, or changes its clock,
+//! for the owner alone. A claim lasts for the life of the process; nothing releases it. The table is
 //! pure so that it can be tested on the host.
+//!
+//! The table belongs to the service's main loop. A peripheral that another thread of the
+//! service serves to other processes (the I2C server) checks each request against
+//! [`PeriphOwners`], where the main loop records every peripheral claim it grants.
+
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::iox::IoxPort;
 use crate::udma::PeriphId;
@@ -88,8 +95,7 @@ impl IoxClaims {
     /// `true` when `pid` may reset `periph`, gate its clock or remap its events: it owns
     /// it, or nobody does.
     pub fn periph_allows(&self, periph: PeriphId, pid: u8) -> bool {
-        let owner = self.periph_owners[periph_index(periph)];
-        owner == 0 || owner == pid
+        owner_allows(self.periph_owners[periph_index(periph)], pid)
     }
 
     fn others_mask(&self, port: IoxPort, pid: u8) -> u16 {
@@ -102,6 +108,42 @@ impl IoxClaims {
         mask
     }
 }
+
+/// The owners of the UDMA peripherals, readable from any thread of the service: a copy of the
+/// peripheral claims of an [`IoxClaims`], recorded by the thread that keeps the table when it
+/// grants a claim and before it answers the claimant. 0 means unclaimed.
+pub struct PeriphOwners {
+    owners: [AtomicU8; PERIPHS],
+}
+
+impl PeriphOwners {
+    pub const fn new() -> Self { PeriphOwners { owners: [const { AtomicU8::new(0) }; PERIPHS] } }
+
+    /// Records `pid` as the owner of `periph`. The first owner stays: a claim never changes
+    /// hands, so a record for another PID, or for PID 0, changes nothing.
+    pub fn record(&self, periph: PeriphId, pid: u8) {
+        if pid == 0 {
+            return;
+        }
+        let _ =
+            self.owners[periph_index(periph)].compare_exchange(0, pid, Ordering::Release, Ordering::Relaxed);
+    }
+
+    /// `true` when `pid` may use `periph` through the service: it owns it, or nobody does.
+    pub fn allows(&self, periph: PeriphId, pid: u8) -> bool {
+        owner_allows(self.owners[periph_index(periph)].load(Ordering::Acquire), pid)
+    }
+
+    /// The PID that owns `periph`; 0 when nobody does.
+    pub fn owner(&self, periph: PeriphId) -> u8 { self.owners[periph_index(periph)].load(Ordering::Acquire) }
+}
+
+impl Default for PeriphOwners {
+    fn default() -> Self { Self::new() }
+}
+
+/// `true` when a peripheral owned by `owner` (0: nobody) is open to `pid`.
+fn owner_allows(owner: u8, pid: u8) -> bool { owner == 0 || owner == pid }
 
 /// The bit position of `periph` in `PeriphId`, which is its slot in the table.
 fn periph_index(periph: PeriphId) -> usize { (periph as u32).trailing_zeros() as usize }
@@ -228,6 +270,48 @@ mod tests {
         claims.claim_periph(PeriphId::Spim2, 0).unwrap();
         assert!(claims.periph_allows(PeriphId::Spim2, UI));
         assert_eq!(claims.claim_periph(PeriphId::Spim2, TUI), Ok(()));
+    }
+
+    #[test]
+    fn an_unclaimed_i2c_channel_serves_every_process() {
+        let owners = PeriphOwners::new();
+        assert!(owners.allows(PeriphId::I2c0, UI));
+        assert!(owners.allows(PeriphId::I2c0, TUI));
+        assert_eq!(owners.owner(PeriphId::I2c0), 0);
+    }
+
+    #[test]
+    fn a_claimed_i2c_channel_serves_only_its_owner() {
+        let mut claims = IoxClaims::new();
+        let owners = PeriphOwners::new();
+        claims.claim_periph(PeriphId::I2c0, TUI).unwrap();
+        owners.record(PeriphId::I2c0, TUI);
+        assert!(owners.allows(PeriphId::I2c0, TUI));
+        assert!(!owners.allows(PeriphId::I2c0, UI), "a transaction from the UI is refused");
+        assert!(!owners.allows(PeriphId::I2c0, 0), "so is one with no PID");
+        assert!(owners.allows(PeriphId::I2c1, UI), "other channels stay open");
+        for pid in [0, TUI, UI] {
+            assert_eq!(owners.allows(PeriphId::I2c0, pid), claims.periph_allows(PeriphId::I2c0, pid));
+        }
+    }
+
+    #[test]
+    fn a_recorded_owner_never_changes() {
+        let owners = PeriphOwners::new();
+        owners.record(PeriphId::I2c0, TUI);
+        owners.record(PeriphId::I2c0, UI);
+        owners.record(PeriphId::I2c0, 0);
+        assert_eq!(owners.owner(PeriphId::I2c0), TUI);
+        assert!(!owners.allows(PeriphId::I2c0, UI));
+    }
+
+    #[test]
+    fn a_zero_pid_is_never_recorded() {
+        let owners = PeriphOwners::new();
+        owners.record(PeriphId::I2c0, 0);
+        assert!(owners.allows(PeriphId::I2c0, UI));
+        owners.record(PeriphId::I2c0, TUI);
+        assert_eq!(owners.owner(PeriphId::I2c0), TUI);
     }
 
     #[test]
