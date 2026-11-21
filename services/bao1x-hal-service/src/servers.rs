@@ -10,6 +10,11 @@ pub mod rtc;
 pub mod susres;
 pub mod trng;
 
+/// The owners of the UDMA peripherals, for the threads that serve one: the main loop records
+/// each peripheral claim here when it grants it, before it answers the claimant.
+#[cfg(feature = "iox-claims")]
+pub static PERIPH_OWNERS: bao1x_api::PeriphOwners = bao1x_api::PeriphOwners::new();
+
 /// Whether the archive length a client gives with its lent buffer (the message offset) lies
 /// within the buffer; logged when not. Without the `checked-access` feature of `xous-ipc`,
 /// `xous_ipc::Buffer` slices the buffer by it unchecked and panics past the end, and trusts the

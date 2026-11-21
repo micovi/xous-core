@@ -33,7 +33,7 @@ bitfield! {
 }
 fn irq_select_from_port(port: IoxPort, pin: u8) -> u32 { (port as u32) * 16 + pin as u32 }
 /// The PID the kernel stamped on the message; 0 when there is none (a kernel-originated message).
-fn sender_pid(sender: &Sender) -> u8 { sender.pid().map(|pid| pid.get()).unwrap_or(0) }
+pub(crate) fn sender_pid(sender: &Sender) -> u8 { sender.pid().map(|pid| pid.get()).unwrap_or(0) }
 fn find_first_none<T>(arr: &[Option<T>]) -> Option<usize> { arr.iter().position(|item| item.is_none()) }
 /// Pins per IOX port; the IOX register helpers assert a pin below this.
 const IOX_PINS: u8 = 16;
@@ -739,6 +739,8 @@ fn main() {
                             Some(periph) if pid != 0 => match claims.claim_periph(periph, pid) {
                                 Ok(()) => {
                                     log::info!("PID {} claimed {:?}", pid, periph);
+                                    // the I2C server refuses other processes from here on
+                                    servers::PERIPH_OWNERS.record(periph, pid);
                                     0
                                 }
                                 Err(PeriphClaimError::Owned) => {
@@ -875,6 +877,10 @@ fn main() {
                     }
                 }
                 HalOpcode::UpdatePerclk => {
+                    #[cfg(feature = "iox-claims")]
+                    let requester = sender_pid(&msg_opt.as_ref().unwrap().sender) as usize;
+                    #[cfg(not(feature = "iox-claims"))]
+                    let requester = 0;
                     if let Some(scalar) = msg_opt.as_mut().unwrap().body.scalar_message_mut() {
                         // lazily fill in these connections on demand. This prevents race conditions on
                         // process startup.
@@ -900,7 +906,8 @@ fn main() {
                                 xous::Message::new_blocking_scalar(
                                     I2cOpcode::UpdatePerclk.to_usize().unwrap(),
                                     scalar.arg1,
-                                    0,
+                                    // the requester, which the I2C server checks under iox-claims
+                                    requester,
                                     0,
                                     0,
                                 ),
